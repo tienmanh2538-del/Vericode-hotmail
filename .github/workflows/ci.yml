@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Basic secret pattern check
+        run: |
+          if git grep -n -E "(ghp_|sk-|xoxb-|AKIA|BEGIN PRIVATE KEY|TELEGRAM_BOT_TOKEN=.+|CLIENT_SECRET=.+)" -- ':!package-lock.json' ':!.env.example'; then
+            echo "Potential secret found. Please review."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: hashFiles('package.json') != ''
+        run: npm ci
+
+      - name: Run lint
+        if: hashFiles('package.json') != ''
+        run: npm run lint --if-present
+
+      - name: Run tests
+        if: hashFiles('package.json') != ''
+        run: npm test --if-present
+
+      - name: Build
+        if: hashFiles('package.json') != ''
+        run: npm run build --if-present

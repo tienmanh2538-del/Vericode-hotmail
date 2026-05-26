@@ -1,0 +1,39 @@
+---
+description: ECC project rules for AI coding workflow
+alwaysApply: true
+---
+
+# ECC Project Rules
+
+Project này dùng nhiều AI phối hợp:
+
+- ChatGPT: planner/PM
+- Claude Code: coder chính
+- Gemini CLI: reviewer/tester
+- Cursor: xem project, sửa nhỏ khi được duyệt
+
+## Luật bắt buộc
+
+- Không tự ý mở rộng scope.
+- Không hardcode secret/token/password.
+- Không log verification code/token/password.
+- Không đọc hoặc hiển thị `.env`.
+- Không xóa file nếu chưa giải thích.
+- Không đổi kiến trúc lớn nếu chưa được duyệt.
+- Mỗi thay đổi phải có cách kiểm tra.
+- Ưu tiên code đơn giản, dễ bảo trì.
+
+## Khi trả lời người dùng
+
+- Giải thích đơn giản.
+- Nếu dùng thuật ngữ tiếng Anh lần đầu, giải thích tiếng Việt ngay bên cạnh.
+- Không nói quá kỹ thuật nếu người dùng không yêu cầu.
+
+## Khi sửa code
+
+Luôn báo:
+
+1. Đã làm gì
+2. File nào thay đổi
+3. Cách kiểm tra
+4. Rủi ro còn lại
