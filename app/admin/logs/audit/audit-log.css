@@ -1,0 +1,124 @@
+.audit-log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin: 0 0 1.25rem;
+  padding: 1rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.audit-log-filters__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 180px;
+}
+
+.audit-log-filters__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.audit-log-filters__input,
+.audit-log-filters__select {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.5rem;
+  background: #fff;
+  font-size: 0.9rem;
+  color: #0f172a;
+}
+
+.audit-log-filters__actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.audit-log-filters__submit {
+  padding: 0.55rem 1rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: #0f172a;
+  color: #f8fafc;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.audit-log-filters__reset {
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  background: #e2e8f0;
+  color: #0f172a;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.audit-log-summary {
+  margin: 0 0 1.25rem;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.audit-log-table__entity-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  background: #f1f5f9;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.25rem;
+}
+
+.audit-log-table__summary {
+  max-width: 28rem;
+  color: #1f2937;
+}
+
+.audit-log-table__metadata {
+  margin: 0.4rem 0 0;
+  padding: 0.4rem 0.55rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.4rem;
+  color: #475569;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.audit-severity {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.audit-severity--info {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.audit-severity--notice {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.audit-severity--warning {
+  background: #fed7aa;
+  color: #9a3412;
+}
+
+.audit-severity--error {
+  background: #fee2e2;
+  color: #991b1b;
+}
