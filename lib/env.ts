@@ -64,6 +64,7 @@ export function loadEnv(
     TELEGRAM_BOT_TOKEN: pickString(source.TELEGRAM_BOT_TOKEN),
     TELEGRAM_ADMIN_ALERT_CHAT_ID: pickString(source.TELEGRAM_ADMIN_ALERT_CHAT_ID),
     ENCRYPTION_KEY: pickString(source.ENCRYPTION_KEY),
+    AUTH_DEV_DEMO_USER: pickString(source.AUTH_DEV_DEMO_USER),
   };
 
   return { values, warnings };

@@ -16,6 +16,7 @@ export interface EnvValues {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_ADMIN_ALERT_CHAT_ID?: string;
   ENCRYPTION_KEY?: string;
+  AUTH_DEV_DEMO_USER?: string;
 }
 
 export interface EnvLoadResult {

@@ -139,3 +139,22 @@ Lệnh nào đã chạy
 Kết quả npm run verify
 Có làm vượt scope không
 Rủi ro còn lại
+
+( 6. Claude nên tạo logic kiểu gì?
+
+Gợi ý thiết kế đơn giản, an toàn:
+
+lib/auth/
+├── roles.ts
+├── permissions.ts
+├── session.ts
+└── guards.ts
+
+Trong đó:
+
+roles.ts: định nghĩa role.
+permissions.ts: map role với permission.
+session.ts: giả lập user hiện tại, chưa login thật.
+guards.ts: kiểm tra user có được vào admin không.
+
+TASK-006 nằm ở phần app/admin route protection, auth skeleton, roles constants, đúng theo project structure. Khu vực app/admin là nơi dashboard nội bộ nằm, còn các route/API khác chỉ nên tạo đúng khi tới task tương ứng.)
