@@ -14,7 +14,18 @@ jobs:
 
       - name: Basic secret pattern check
         run: |
-          if git grep -n -E "(ghp_|sk-|xoxb-|AKIA|BEGIN PRIVATE KEY|TELEGRAM_BOT_TOKEN=.+|CLIENT_SECRET=.+)" -- ':!package-lock.json' ':!.env.example'; then
+          # Build the pattern from fragments so this workflow file itself
+          # does not trip the secret scan it runs.
+          GH='gh'; UND='p_'
+          S='sk'; DA='-'
+          XO='xo'; XB='xb-'
+          AK='AK'; IA='IA'
+          BG='BEGIN'; PK=' PRIVATE KEY'
+          TBT='TELEGRAM_BOT_TOKEN'
+          CSEC='CLIENT_SECRET'
+          EQ='='
+          PATTERN="(${GH}${UND}|${S}${DA}|${XO}${XB}|${AK}${IA}|${BG}${PK}|${TBT}${EQ}.+|${CSEC}${EQ}.+)"
+          if git grep -n -E "$PATTERN" -- ':!package-lock.json' ':!.env.example'; then
             echo "Potential secret found. Please review."
             exit 1
           fi

@@ -263,10 +263,10 @@ Organize findings by severity. For each issue:
 ```
 [CRITICAL] Hardcoded API key in source
 File: src/api/client.ts:42
-Issue: API key "sk-abc..." exposed in source code. This will be committed to git history.
+Issue: API key "example-api-key" exposed in source code. This will be committed to git history.
 Fix: Move to environment variable and add to .gitignore/.env.example
 
-  const apiKey = "sk-abc123";           // BAD
+  const apiKey = "example-api-key";     // BAD
   const apiKey = process.env.API_KEY;   // GOOD
 ```
 

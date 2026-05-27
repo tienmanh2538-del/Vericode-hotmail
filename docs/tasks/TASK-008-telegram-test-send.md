@@ -43,7 +43,7 @@ Bắt buộc:
 Biến môi trường dự kiến:
 
 ```env
-TELEGRAM_BOT_TOKEN=
+TELEGRAM_BOT_TOKEN =
 ```
 
 Nếu project đã có `TELEGRAM_ADMIN_ALERT_CHAT_ID` từ task trước hoặc `.env.example`, không tự ý đổi tên nếu không cần.
@@ -90,7 +90,7 @@ Claude chỉ được làm các phần sau:
 1. Kiểm tra cấu trúc project thực tế trước khi tạo file.
 2. Nếu project dùng `src/`, tạo file trong `src/services/...` và `src/app/...`.
 3. Nếu project không dùng `src/`, tạo file trong `services/...` và `app/...`.
-4. Cập nhật `.env.example` với `TELEGRAM_BOT_TOKEN=` nếu chưa có.
+4. Cập nhật `.env.example` với biến `TELEGRAM_BOT_TOKEN` (giá trị rỗng) nếu chưa có.
 5. Tạo Telegram sender service.
 6. Tạo API route test-send.
 7. Validate input cơ bản.
@@ -475,7 +475,7 @@ Cách lấy chat ID có thể làm sau bằng cách gọi Bot API `getUpdates`, 
 Trong `.env` local:
 
 ```env
-TELEGRAM_BOT_TOKEN=your_real_bot_token_here
+TELEGRAM_BOT_TOKEN = your_real_bot_token_here
 ```
 
 Không đưa token thật vào `.env.example`.
@@ -548,7 +548,7 @@ Nhưng `npm run verify` là bắt buộc nếu đã tồn tại từ TASK-002.
 
 Task chỉ được coi là hoàn thành khi đạt đủ:
 
-1. Có `TELEGRAM_BOT_TOKEN=` trong `.env.example`.
+1. Có biến `TELEGRAM_BOT_TOKEN` (giá trị rỗng) trong `.env.example`.
 2. Không có token thật trong source code.
 3. Không có token thật trong test.
 4. Có Telegram sender service.

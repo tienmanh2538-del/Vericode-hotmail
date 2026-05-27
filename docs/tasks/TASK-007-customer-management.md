@@ -312,7 +312,7 @@ Không sửa rộng TASK-006 trong TASK-007 trừ khi lỗi rất nhỏ và tr�
 TASK-007 chỉ được coi là hoàn thành khi đạt đủ:
 ```text
 [ ] Đã tạo docs/tasks/TASK-007-customer-management.md
-[ ] Đang làm trên branch riêng feature/task-007-customer-management
+[ ] Đang làm trên branch riêng `feature/TASK-007-customer-management`
 [ ] /admin/customers mở được
 [ ] Trang customers nằm trong admin layout
 [ ] Có danh sách customer
