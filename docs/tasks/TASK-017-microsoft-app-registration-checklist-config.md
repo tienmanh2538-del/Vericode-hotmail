@@ -332,7 +332,7 @@ Tài liệu cần hướng dẫn user tạo/cập nhật `.env.local` ở local 
 
 ```env
 MICROSOFT_CLIENT_ID=replace_with_application_client_id
-MICROSOFT_CLIENT_SECRET=replace_with_client_secret_value
+MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=common
 MICROSOFT_REDIRECT_URI=http://localhost:3000/api/microsoft/oauth/callback
 ```

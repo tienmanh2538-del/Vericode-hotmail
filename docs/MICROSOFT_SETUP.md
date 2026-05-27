@@ -202,9 +202,12 @@ Tạo (hoặc cập nhật) file `.env.local` ở root của repo. **Không** co
 ```env
 # Microsoft OAuth / Graph
 MICROSOFT_CLIENT_ID=replace_with_application_client_id
-MICROSOFT_CLIENT_SECRET=replace_with_client_secret_value
+MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=common
 MICROSOFT_REDIRECT_URI=http://localhost:3000/api/microsoft/oauth/callback
+
+# Điền client secret thật trong .env.local trên máy local.
+# Không commit client secret thật lên GitHub.
 ```
 
 Diễn giải:
