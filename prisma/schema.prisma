@@ -1,0 +1,203 @@
+// Verification Tool initial schema (TASK-004).
+// Production target: PostgreSQL. Local task does not require a real DB.
+// Sensitive fields are stored as hashes or encrypted blobs — never plaintext.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  OWNER
+  ADMIN
+  STAFF_READ_ONLY
+}
+
+enum CustomerStatus {
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum MailboxProvider {
+  MICROSOFT
+  MOCK
+}
+
+enum MailboxStatus {
+  ACTIVE
+  RECONNECT_REQUIRED
+  SUBSCRIPTION_EXPIRED
+  WEBHOOK_FAILED
+  DISABLED
+  ERROR
+}
+
+enum TelegramMappingStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum GraphSubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  FAILED
+  RENEWING
+}
+
+enum ProcessedMessageStatus {
+  DETECTED
+  SENT
+  FAILED
+  SKIPPED_LOW_CONFIDENCE
+  DUPLICATE
+}
+
+enum AuditAction {
+  MAILBOX_CONNECTED
+  MAILBOX_DISCONNECTED
+  TELEGRAM_MAPPING_CREATED
+  TELEGRAM_MAPPING_UPDATED
+  CODE_DETECTED
+  CODE_SENT
+  CODE_SKIPPED_LOW_CONFIDENCE
+  SUBSCRIPTION_RENEWED
+  TOKEN_REFRESH_FAILED
+}
+
+// -----------------------------------------------------------------------------
+// Models
+// -----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  role         UserRole @default(STAFF_READ_ONLY)
+  passwordHash String?
+  authProvider String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  createdMailboxes        Mailbox[]         @relation("MailboxCreatedBy")
+  createdTelegramMappings TelegramMapping[] @relation("TelegramMappingCreatedBy")
+  auditLogs               AuditLog[]
+}
+
+model Customer {
+  id        String         @id @default(cuid())
+  name      String
+  status    CustomerStatus @default(ACTIVE)
+  notes     String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  mailboxes Mailbox[]
+}
+
+model Mailbox {
+  id                    String          @id @default(cuid())
+  emailAddress          String          @unique
+  provider              MailboxProvider
+  ownerCustomerName     String?
+  customerId            String?
+  customer              Customer?       @relation(fields: [customerId], references: [id])
+  status                MailboxStatus   @default(ACTIVE)
+  microsoftUserId       String?
+  // OAuth refresh token MUST be encrypted before write. Encryption helper
+  // arrives in TASK-020; this column never holds plaintext.
+  encryptedRefreshToken String?
+  tokenLastRefreshedAt  DateTime?
+  lastSuccessfulSyncAt  DateTime?
+  createdById           String?
+  createdBy             User?           @relation("MailboxCreatedBy", fields: [createdById], references: [id])
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  telegramMappings   TelegramMapping[]
+  graphSubscriptions GraphSubscription[]
+  processedMessages  ProcessedMessage[]
+
+  @@index([customerId])
+  @@index([status])
+}
+
+model TelegramMapping {
+  id                String                @id @default(cuid())
+  mailboxId         String
+  mailbox           Mailbox               @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  telegramChatId    String
+  telegramGroupName String?
+  status            TelegramMappingStatus @default(ACTIVE)
+  createdById       String?
+  createdBy         User?                 @relation("TelegramMappingCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@unique([mailboxId, telegramChatId])
+  @@index([status])
+}
+
+model GraphSubscription {
+  id                 String                  @id @default(cuid())
+  mailboxId          String
+  mailbox            Mailbox                 @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  subscriptionId     String                  @unique
+  resource           String
+  // Microsoft Graph clientState MUST NOT be persisted in plaintext — we only
+  // compare hashes on webhook receipt.
+  clientStateHash    String
+  expirationDateTime DateTime
+  status             GraphSubscriptionStatus @default(ACTIVE)
+  lastRenewedAt      DateTime?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @updatedAt
+
+  @@index([mailboxId])
+  @@index([status])
+}
+
+model ProcessedMessage {
+  id                String                 @id @default(cuid())
+  mailboxId         String
+  mailbox           Mailbox                @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  graphMessageId    String
+  internetMessageId String?
+  receivedAt        DateTime
+  senderEmail       String
+  subjectHash       String?
+  // Verification code is NEVER stored in plaintext. codeHash is used for
+  // dedup/audit only and cannot recover the original code.
+  codeHash          String?
+  status            ProcessedMessageStatus @default(DETECTED)
+  sentToTelegramAt  DateTime?
+  createdAt         DateTime               @default(now())
+
+  @@unique([mailboxId, graphMessageId])
+  @@index([receivedAt])
+  @@index([status])
+}
+
+model AuditLog {
+  id           String      @id @default(cuid())
+  actorUserId  String?
+  actorUser    User?       @relation(fields: [actorUserId], references: [id])
+  action       AuditAction
+  entityType   String
+  entityId     String?
+  metadataJson Json?
+  ipAddress    String?
+  createdAt    DateTime    @default(now())
+
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}

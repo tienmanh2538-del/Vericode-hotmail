@@ -30,6 +30,20 @@ jobs:
         if: hashFiles('package.json') != ''
         run: npm ci
 
+      - name: Generate Prisma client
+        if: hashFiles('prisma/schema.prisma') != ''
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/verification_tool
+        run: npm run db:generate
+
+      - name: Validate Prisma schema
+        if: hashFiles('prisma/schema.prisma') != ''
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/verification_tool
+        run: npm run db:validate
+
       - name: Run verify (lint + typecheck + test + build)
         if: hashFiles('package.json') != ''
+        env:
+          DATABASE_URL: postgresql://user:password@localhost:5432/verification_tool
         run: npm run verify
