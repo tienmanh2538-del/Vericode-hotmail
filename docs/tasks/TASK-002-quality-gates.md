@@ -84,3 +84,25 @@ Sau task này, project phải có các lệnh:
 
 }
 
+
+
+
+
+https://github.com/tienmanh2538-del/Vericode-hotmail.git
+
+
+
+
+
+cd C:\\Projects\\verification-tool
+
+
+
+git remote remove origin
+
+git remote add origin https://github.com/tienmanh2538-del/Vericode-hotmail.git
+
+
+
+git remote -v
+
