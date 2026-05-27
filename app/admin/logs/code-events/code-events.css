@@ -1,0 +1,78 @@
+.code-event-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1.5rem;
+}
+
+.code-event-summary__card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 0.85rem 1rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.code-event-summary__label {
+  margin: 0;
+  color: #475569;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.code-event-summary__value {
+  margin: 0.3rem 0 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.code-event-table__masked {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  background: #f1f5f9;
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.25rem;
+}
+
+.code-event-table__message {
+  max-width: 22rem;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.code-event-status {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.code-event-status--sent {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.code-event-status--detected {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.code-event-status--skipped {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.code-event-status--failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.code-event-status--neutral {
+  background: #e2e8f0;
+  color: #475569;
+}
