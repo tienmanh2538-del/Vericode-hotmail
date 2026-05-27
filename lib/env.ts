@@ -1,39 +1,26 @@
-export type AppEnv = 'development' | 'test' | 'production';
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-
-export interface EnvValues {
-  APP_ENV: AppEnv;
-  APP_URL: string;
-  LOG_LEVEL: LogLevel;
-  DATABASE_URL?: string;
-  MICROSOFT_CLIENT_ID?: string;
-  MICROSOFT_CLIENT_SECRET?: string;
-  MICROSOFT_TENANT_ID?: string;
-  MICROSOFT_REDIRECT_URI?: string;
-  TELEGRAM_BOT_TOKEN?: string;
-  TELEGRAM_ADMIN_ALERT_CHAT_ID?: string;
-  ENCRYPTION_KEY?: string;
-}
-
-export interface EnvLoadResult {
-  ok: boolean;
-  values: EnvValues;
-  missing: string[];
-  warnings: string[];
-}
-
-const APP_ENV_VALUES: AppEnv[] = ['development', 'test', 'production'];
-const LOG_LEVEL_VALUES: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+import {
+  APP_ENV_VALUES,
+  DATABASE_REQUIRED,
+  ENCRYPTION_REQUIRED,
+  LOG_LEVEL_VALUES,
+  MICROSOFT_REQUIRED,
+  TELEGRAM_REQUIRED,
+  type AppEnv,
+  type EnvKey,
+  type EnvLoadResult,
+  type EnvValues,
+  type LogLevel,
+} from './env.schema';
 
 function pickEnum<T extends string>(
   raw: string | undefined,
-  allowed: T[],
+  allowed: readonly T[],
   fallback: T,
   warnings: string[],
   key: string,
 ): T {
   if (raw === undefined || raw === '') return fallback;
-  if ((allowed as string[]).includes(raw)) return raw as T;
+  if ((allowed as readonly string[]).includes(raw)) return raw as T;
   warnings.push(`${key} has unsupported value; falling back to "${fallback}"`);
   return fallback;
 }
@@ -49,8 +36,20 @@ export function loadEnv(
 ): EnvLoadResult {
   const warnings: string[] = [];
 
-  const appEnv = pickEnum(source.APP_ENV, APP_ENV_VALUES, 'development', warnings, 'APP_ENV');
-  const logLevel = pickEnum(source.LOG_LEVEL, LOG_LEVEL_VALUES, 'info', warnings, 'LOG_LEVEL');
+  const appEnv: AppEnv = pickEnum(
+    source.APP_ENV,
+    APP_ENV_VALUES,
+    'development',
+    warnings,
+    'APP_ENV',
+  );
+  const logLevel: LogLevel = pickEnum(
+    source.LOG_LEVEL,
+    LOG_LEVEL_VALUES,
+    'info',
+    warnings,
+    'LOG_LEVEL',
+  );
   const appUrl = pickString(source.APP_URL) ?? 'http://localhost:3000';
 
   const values: EnvValues = {
@@ -67,25 +66,70 @@ export function loadEnv(
     ENCRYPTION_KEY: pickString(source.ENCRYPTION_KEY),
   };
 
-  const productionRequired: (keyof EnvValues)[] = [
-    'DATABASE_URL',
-    'MICROSOFT_CLIENT_ID',
-    'MICROSOFT_CLIENT_SECRET',
-    'TELEGRAM_BOT_TOKEN',
-    'ENCRYPTION_KEY',
-  ];
+  return { values, warnings };
+}
 
-  const missing: string[] = [];
-  if (appEnv === 'production') {
-    for (const key of productionRequired) {
-      if (!values[key]) missing.push(key);
-    }
+export class MissingEnvError extends Error {
+  readonly missing: EnvKey[];
+  readonly module: string;
+
+  constructor(moduleName: string, missing: EnvKey[]) {
+    super(
+      `Missing required environment variables for ${moduleName}: ${missing.join(', ')}`,
+    );
+    this.name = 'MissingEnvError';
+    this.module = moduleName;
+    this.missing = missing;
   }
+}
 
+function assertRequired(
+  moduleName: string,
+  values: EnvValues,
+  keys: EnvKey[],
+): void {
+  const missing = keys.filter((k) => !values[k]);
+  if (missing.length > 0) throw new MissingEnvError(moduleName, missing);
+}
+
+export function requireMicrosoftEnv(values: EnvValues = loadEnv().values): {
+  clientId: string;
+  clientSecret: string;
+  tenantId: string;
+  redirectUri: string;
+} {
+  assertRequired('microsoft-oauth', values, MICROSOFT_REQUIRED);
   return {
-    ok: missing.length === 0,
-    values,
-    missing,
-    warnings,
+    clientId: values.MICROSOFT_CLIENT_ID as string,
+    clientSecret: values.MICROSOFT_CLIENT_SECRET as string,
+    tenantId: values.MICROSOFT_TENANT_ID as string,
+    redirectUri: values.MICROSOFT_REDIRECT_URI as string,
   };
 }
+
+export function requireTelegramEnv(values: EnvValues = loadEnv().values): {
+  botToken: string;
+  adminAlertChatId?: string;
+} {
+  assertRequired('telegram', values, TELEGRAM_REQUIRED);
+  return {
+    botToken: values.TELEGRAM_BOT_TOKEN as string,
+    adminAlertChatId: values.TELEGRAM_ADMIN_ALERT_CHAT_ID,
+  };
+}
+
+export function requireDatabaseEnv(values: EnvValues = loadEnv().values): {
+  url: string;
+} {
+  assertRequired('database', values, DATABASE_REQUIRED);
+  return { url: values.DATABASE_URL as string };
+}
+
+export function requireEncryptionEnv(values: EnvValues = loadEnv().values): {
+  key: string;
+} {
+  assertRequired('encryption', values, ENCRYPTION_REQUIRED);
+  return { key: values.ENCRYPTION_KEY as string };
+}
+
+export type { AppEnv, EnvLoadResult, EnvValues, LogLevel, EnvKey };

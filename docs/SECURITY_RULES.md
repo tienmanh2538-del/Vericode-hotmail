@@ -83,7 +83,14 @@ Gemini CLI, Cursor, ChatGPT).
 - No agent may read or print `.env` content without explicit, justified
   human approval.
 
-## 10. Updating these rules
+## 10. Incident response
+
+- If you suspect that a secret or verification code has been written to logs,
+  the build pipeline, or any persisted store: immediately rotate the affected
+  secret, purge the offending log entries, and open a PR fixing the offending
+  code path before the next deploy.
+
+## 11. Updating these rules
 
 - This document is the source of truth. Changing it requires a PR and human
   review. Code that contradicts these rules must be fixed in the code, not
