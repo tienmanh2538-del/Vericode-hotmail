@@ -19,7 +19,7 @@ body {
   line-height: 1.5;
 }
 
-main {
+body > main {
   max-width: 720px;
   margin: 0 auto;
   padding: 2rem 1.25rem;
