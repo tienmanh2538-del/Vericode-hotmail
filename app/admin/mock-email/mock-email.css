@@ -1,0 +1,42 @@
+.mock-email-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+@media (min-width: 1024px) {
+  .mock-email-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.mock-email-preview {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  padding: 1rem;
+  background: #f6f8fa;
+  min-height: 12rem;
+  overflow: auto;
+}
+
+.mock-email-preview__heading {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.mock-email-preview__pre {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.mock-email-preview__empty {
+  margin: 0;
+  color: #57606a;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}

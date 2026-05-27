@@ -13,6 +13,7 @@ const NAV_ITEMS: NavItem[] = [
   { label: "Customers", href: "/admin/customers" },
   { label: "Mailboxes", href: "/admin/mailboxes" },
   { label: "Telegram", href: "/admin/telegram" },
+  { label: "Mock Email", href: "/admin/mock-email" },
   { label: "Logs", href: "/admin/logs" },
   { label: "Health", href: "/admin/health" },
 ];

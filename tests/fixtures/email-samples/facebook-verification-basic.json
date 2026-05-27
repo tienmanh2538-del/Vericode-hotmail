@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "purpose": "Mock email fixture for TASK-010. Synthetic data only.",
+    "warning": "Not a real customer mailbox, not a real verification code."
+  },
+  "mailboxEmail": "mock-mailbox-1@example.com",
+  "fromEmail": "security@facebookmail.example",
+  "fromName": "Facebook",
+  "subject": "123456 is your Facebook confirmation code",
+  "receivedAt": "2025-01-15T08:30:00Z",
+  "bodyPreview": "Hi, 123456 is your confirmation code. This code will expire shortly.",
+  "body": "Hi,\n\n123456 is your Facebook confirmation code.\n\nThis code will expire in 10 minutes. If you didn't request it, please ignore this email.\n\nThanks,\nThe Facebook team"
+}

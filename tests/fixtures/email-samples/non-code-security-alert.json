@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "purpose": "Negative-case mock email fixture for TASK-010 (security alert without a code). Synthetic data only.",
+    "warning": "Not a real sender, not a real alert."
+  },
+  "mailboxEmail": "mock-mailbox-4@example.com",
+  "fromEmail": "alerts@security-alert.example",
+  "fromName": "Example Security",
+  "subject": "New sign-in to your Example account",
+  "receivedAt": "2025-04-21T22:15:00Z",
+  "bodyPreview": "We noticed a new sign-in. If this was you, no action is needed.",
+  "body": "Hi,\n\nWe noticed a new sign-in to your Example account from a new device. If this was you, no action is needed.\n\nIf you did not sign in, please review your recent activity. This message does not contain a verification code.\n\nThanks,\nExample Security"
+}

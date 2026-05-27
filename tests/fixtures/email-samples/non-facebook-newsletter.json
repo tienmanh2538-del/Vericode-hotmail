@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "purpose": "Negative-case mock email fixture for TASK-010 (newsletter, not a verification email). Synthetic data only.",
+    "warning": "Not a real sender."
+  },
+  "mailboxEmail": "mock-mailbox-3@example.com",
+  "fromEmail": "weekly@newsletter.example",
+  "fromName": "Example Weekly",
+  "subject": "Your weekly digest - 5 fresh reads inside",
+  "receivedAt": "2025-03-10T09:00:00Z",
+  "bodyPreview": "This week: 5 articles you might enjoy. Plus our community picks.",
+  "body": "Hello reader,\n\nWelcome back to your weekly digest. Here are five articles you might enjoy this week, plus community picks and an upcoming meetup announcement.\n\nNo verification codes, no security action required.\n\n- Example Weekly"
+}

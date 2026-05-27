@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "purpose": "Mock email fixture for TASK-010 (Vietnamese variant). Synthetic data only.",
+    "warning": "Not a real customer mailbox, not a real verification code."
+  },
+  "mailboxEmail": "mock-mailbox-2@example.com",
+  "fromEmail": "no-reply@meta.example",
+  "fromName": "Meta",
+  "subject": "Mã xác minh Facebook của bạn",
+  "receivedAt": "2025-02-03T14:05:00+07:00",
+  "bodyPreview": "Mã xác minh của bạn là 654321. Mã sẽ hết hạn trong 10 phút.",
+  "body": "Xin chào,\n\nMã xác minh Facebook của bạn là 654321.\n\nMã này sẽ hết hạn trong 10 phút. Nếu bạn không yêu cầu mã này, vui lòng bỏ qua email.\n\nCảm ơn,\nĐội ngũ Meta"
+}
