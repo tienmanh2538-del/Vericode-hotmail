@@ -7,6 +7,11 @@ import {
   MicrosoftOAuthTokenExchangeError,
   exchangeAuthorizationCodeForTokens,
 } from '@/services/microsoft/oauth-token-exchange.service';
+import { fetchMicrosoftProfile } from '@/services/microsoft/microsoft-profile.service';
+import {
+  MailboxConnectError,
+  saveConnectedMailbox,
+} from '@/services/microsoft/mailbox-connect.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +23,8 @@ type CallbackReason =
   | 'invalid_request'
   | 'invalid_state'
   | 'missing_code'
-  | 'token_exchange_failed';
+  | 'token_exchange_failed'
+  | 'mailbox_save_failed';
 
 const MICROSOFT_ERROR_REASON_MAP: Record<string, CallbackReason> = {
   access_denied: 'access_denied',
@@ -97,8 +103,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return buildRedirect(request, env, 'error', 'invalid_state');
   }
 
+  let tokens;
   try {
-    await exchangeAuthorizationCodeForTokens({ code }, { env });
+    tokens = await exchangeAuthorizationCodeForTokens({ code }, { env });
   } catch (err: unknown) {
     if (err instanceof MicrosoftOAuthTokenExchangeError) {
       logger.warn('Microsoft OAuth token exchange failed', {
@@ -110,6 +117,37 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       logger.error('Microsoft OAuth callback unexpected error');
     }
     return buildRedirect(request, env, 'error', 'token_exchange_failed');
+  }
+
+  // offline_access is required for refresh_token; without it we cannot keep
+  // the mailbox ACTIVE, so we refuse to persist a half-connected mailbox.
+  if (!tokens.refreshToken) {
+    logger.warn('Microsoft OAuth callback succeeded without refresh_token');
+    return buildRedirect(request, env, 'error', 'token_exchange_failed');
+  }
+
+  try {
+    const profile = await fetchMicrosoftProfile(tokens.accessToken);
+    const emailAddress = profile.mail ?? profile.userPrincipalName;
+    if (typeof emailAddress !== 'string' || emailAddress.length === 0) {
+      logger.warn('Microsoft profile missing both mail and userPrincipalName');
+      return buildRedirect(request, env, 'error', 'mailbox_save_failed');
+    }
+
+    await saveConnectedMailbox({
+      microsoftUserId: profile.id,
+      emailAddress,
+      displayName: profile.displayName,
+      refreshToken: tokens.refreshToken,
+      scope: tokens.scope ?? null,
+    });
+  } catch (err: unknown) {
+    if (err instanceof MailboxConnectError) {
+      logger.warn('Mailbox connect failed after OAuth callback', { kind: err.kind });
+    } else {
+      logger.error('Microsoft OAuth mailbox save unexpected error');
+    }
+    return buildRedirect(request, env, 'error', 'mailbox_save_failed');
   }
 
   return buildRedirect(request, env, 'success');
