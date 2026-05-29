@@ -1,0 +1,138 @@
+.mailbox-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.mailbox-detail__heading {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.mailbox-detail__subtitle {
+  margin: 0.35rem 0 0;
+  color: #475569;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.mailbox-detail__back {
+  align-self: flex-start;
+  display: inline-block;
+  padding: 0.55rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  text-decoration: none;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.mailbox-detail__summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.mailbox-detail__section {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.mailbox-detail__section-title {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.mailbox-detail__definition {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) 1fr;
+  row-gap: 0.6rem;
+  column-gap: 1rem;
+  margin: 0;
+}
+
+.mailbox-detail__definition dt {
+  color: #64748b;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.mailbox-detail__definition dd {
+  margin: 0;
+  color: #0f172a;
+  font-size: 0.95rem;
+  word-break: break-all;
+}
+
+.mailbox-detail__empty {
+  margin: 0;
+  padding: 1rem;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 0.5rem;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.mailbox-detail__table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.mailbox-detail__table th,
+.mailbox-detail__table td {
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 0.9rem;
+  vertical-align: top;
+}
+
+.mailbox-detail__table thead th {
+  background: #f1f5f9;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #475569;
+}
+
+.mailbox-detail__table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.mailbox-detail__mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  color: #0f172a;
+}
+
+.mailbox-detail__muted {
+  color: #64748b;
+}
+
+@media (max-width: 720px) {
+  .mailbox-detail__definition {
+    grid-template-columns: 1fr;
+  }
+
+  .mailbox-detail__definition dt {
+    margin-top: 0.35rem;
+  }
+}

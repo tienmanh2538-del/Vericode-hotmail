@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { MailboxStatusBadge } from '@/components/status/MailboxStatusBadge';
 import { SubscriptionStatusBadge } from '@/components/status/SubscriptionStatusBadge';
 import { TelegramMappingStatusBadge } from '@/components/status/TelegramMappingStatusBadge';
@@ -83,9 +84,12 @@ export function MailboxListTable({ mailboxes }: MailboxListTableProps) {
               <td>{formatDateTime(mailbox.lastSuccessfulSyncAt)}</td>
               <td>{formatDate(mailbox.createdAt)}</td>
               <td>
-                <span style={{ color: '#64748b', fontSize: '0.85rem' }}>
-                  Chi tiết — sẽ làm ở TASK-029
-                </span>
+                <Link
+                  href={`/admin/mailboxes/${mailbox.id}`}
+                  className="customers-table__action"
+                >
+                  View details
+                </Link>
               </td>
             </tr>
           );
