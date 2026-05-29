@@ -30,17 +30,36 @@ export class TelegramSendError extends Error {
   readonly kind: TelegramErrorKind;
   readonly field?: 'chatId' | 'text';
   readonly telegramDescription?: string;
+  /**
+   * HTTP status returned by the Telegram Bot API (only set for `telegram_api`
+   * failures). Used by the retry layer (TASK-033) to classify retryable vs
+   * permanent errors. Never carries token/code material.
+   */
+  readonly statusCode?: number;
+  /**
+   * `parameters.retry_after` (seconds) when Telegram throttles with HTTP 429.
+   * The retry layer caps this before sleeping so it can never hang a test or
+   * stall the worker indefinitely.
+   */
+  readonly retryAfterSeconds?: number;
 
   constructor(
     kind: TelegramErrorKind,
     message: string,
-    options?: { field?: 'chatId' | 'text'; telegramDescription?: string },
+    options?: {
+      field?: 'chatId' | 'text';
+      telegramDescription?: string;
+      statusCode?: number;
+      retryAfterSeconds?: number;
+    },
   ) {
     super(message);
     this.name = 'TelegramSendError';
     this.kind = kind;
     this.field = options?.field;
     this.telegramDescription = options?.telegramDescription;
+    this.statusCode = options?.statusCode;
+    this.retryAfterSeconds = options?.retryAfterSeconds;
   }
 }
 
@@ -48,6 +67,15 @@ interface TelegramApiResponse {
   ok: boolean;
   result?: { message_id?: number };
   description?: string;
+  parameters?: { retry_after?: number };
+}
+
+function readRetryAfterSeconds(payload: unknown): number | undefined {
+  if (!isTelegramApiResponse(payload)) return undefined;
+  const value = payload.parameters?.retry_after;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function validate(input: SendTelegramMessageInput): { chatId: string; text: string } {
@@ -122,6 +150,7 @@ export async function sendTelegramMessage(
       isTelegramApiResponse(payload) && typeof payload.description === 'string'
         ? payload.description
         : undefined;
+    const retryAfterSeconds = readRetryAfterSeconds(payload);
     logger.warn('Telegram API rejected sendMessage', {
       chatId,
       status: response.status,
@@ -129,6 +158,8 @@ export async function sendTelegramMessage(
     });
     throw new TelegramSendError('telegram_api', 'Telegram send failed', {
       telegramDescription: description,
+      statusCode: response.status,
+      retryAfterSeconds,
     });
   }
 
