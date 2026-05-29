@@ -14,7 +14,9 @@
     "db:validate": "prisma validate",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "worker:delta": "tsx scripts/run-delta-polling-worker.ts",
+    "worker:delta:once": "tsx scripts/run-delta-polling-worker.ts --once"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",
@@ -31,6 +33,7 @@
     "eslint": "8.57.0",
     "eslint-config-next": "14.2.35",
     "prisma": "5.22.0",
+    "tsx": "^4.19.2",
     "typescript": "5.5.3",
     "vitest": "2.1.9"
   }

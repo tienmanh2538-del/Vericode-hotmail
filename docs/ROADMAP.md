@@ -122,6 +122,7 @@
 \- TASK-033: Tạo Telegram retry \& failure handling
 
 \- TASK-034: Tạo health dashboard
+  - Note from TASK-031: verify production email-worker is wired to a real pipeline (createEmailWorker hiện default chỉ là type-only cast, không thực sự chạy production) và surface trạng thái qua dashboard / operational check.
 
 \- TASK-035: Tạo alert service
 
@@ -132,10 +133,15 @@
 
 
 \- TASK-036: Security hardening review
+lưu ý:   - Tối ưu hóa Delta Polling: Hỗ trợ bootstrap mailbox cực lớn (dùng $filter thời gian hoặc tăng max pages cho
+      lần chạy đầu).
+    5   - Sửa lỗi Token Rotation: Đảm bảo service cấp mới Access Token (ví dụ `refresh-access-token.service.ts`) có
+      lưu lại Refresh Token mới xuống database nếu Microsoft trả về (hiện tại có rủi ro mất token nếu bị cấp mới).
 
 \- TASK-037: E2E test cho mock flow
 
 \- TASK-038: E2E test cho Microsoft test mailbox
+  - Note from TASK-031: cover trường hợp webhook + delta polling cùng thấy 1 graphMessageId — Telegram phải nhận đúng 1 lần (dựa vào ProcessedMessage unique [mailboxId, graphMessageId]).
 
 \- TASK-039: Staging deployment setup
 

@@ -16,8 +16,11 @@ export type EmailQueueJobName =
   (typeof EMAIL_QUEUE_JOB_NAMES)[keyof typeof EMAIL_QUEUE_JOB_NAMES];
 
 export const EMAIL_WEBHOOK_JOB_SOURCE = 'microsoft-webhook' as const;
+export const EMAIL_DELTA_POLLING_JOB_SOURCE = 'delta-polling' as const;
 
 export type EmailWebhookJobSource = typeof EMAIL_WEBHOOK_JOB_SOURCE;
+export type EmailDeltaPollingJobSource = typeof EMAIL_DELTA_POLLING_JOB_SOURCE;
+export type EmailJobSource = EmailWebhookJobSource | EmailDeltaPollingJobSource;
 
 /**
  * Payload pushed onto the email queue after a Microsoft Graph webhook
@@ -36,6 +39,28 @@ export interface EmailWebhookJobData {
   queuedAt: string;
   source: EmailWebhookJobSource;
 }
+
+/**
+ * TASK-031 — Payload pushed onto the email queue by the backup delta polling
+ * worker. Carries the same `mailboxId` + `graphMessageId` identifiers the
+ * pipeline already consumes; everything else (detector, extractor, Telegram)
+ * runs in the existing TASK-027 pipeline. There is no clientState here — the
+ * graph message id was discovered via the authenticated delta API, not via an
+ * untrusted webhook body.
+ */
+export interface EmailDeltaPollingJobData {
+  mailboxId: string;
+  graphMessageId: string;
+  queuedAt: string;
+  source: EmailDeltaPollingJobSource;
+}
+
+/**
+ * Discriminated union covering every payload the email queue accepts. The
+ * `source` field is the discriminator. Existing webhook tests/callers continue
+ * to deal in EmailWebhookJobData unchanged.
+ */
+export type EmailJobData = EmailWebhookJobData | EmailDeltaPollingJobData;
 
 export const FORBIDDEN_JOB_DATA_KEYS: readonly string[] = [
   'accessToken',

@@ -1,0 +1,560 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+import {
+  runDeltaPollingOnce,
+  __internal,
+  type DeltaPollingAccessTokenPort,
+  type DeltaPollingDeps,
+  type DeltaPollingEnqueuePort,
+  type DeltaPollingMailbox,
+  type DeltaPollingMailboxRepo,
+} from '@/services/microsoft/delta-polling.service';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+interface FakeRepoState {
+  mailboxes: DeltaPollingMailbox[];
+  savedCursors: Array<{ mailboxId: string; cursorUrl: string; polledAt: Date }>;
+  recordedErrors: Array<{
+    mailboxId: string;
+    message: string;
+    occurredAt: Date;
+  }>;
+  reconnectMarked: string[];
+  listImpl?: () => Promise<DeltaPollingMailbox[]>;
+}
+
+function createFakeRepo(initial: DeltaPollingMailbox[]): {
+  repo: DeltaPollingMailboxRepo;
+  state: FakeRepoState;
+} {
+  const state: FakeRepoState = {
+    mailboxes: [...initial],
+    savedCursors: [],
+    recordedErrors: [],
+    reconnectMarked: [],
+  };
+  const repo: DeltaPollingMailboxRepo = {
+    async listActiveMicrosoftMailboxes() {
+      if (state.listImpl) return state.listImpl();
+      return state.mailboxes;
+    },
+    async saveDeltaCursor(mailboxId, cursorUrl, polledAt) {
+      state.savedCursors.push({ mailboxId, cursorUrl, polledAt });
+    },
+    async recordDeltaError(mailboxId, message, occurredAt) {
+      state.recordedErrors.push({ mailboxId, message, occurredAt });
+    },
+    async markReconnectRequired(mailboxId) {
+      state.reconnectMarked.push(mailboxId);
+    },
+  };
+  return { repo, state };
+}
+
+function createFakeAccessToken(
+  tokenByMailboxId: Record<string, string | (() => Promise<string>)>,
+): DeltaPollingAccessTokenPort {
+  return {
+    async getAccessTokenForMailbox(mailbox) {
+      const entry = tokenByMailboxId[mailbox.id];
+      if (entry === undefined) {
+        throw new Error(`no token configured for mailbox ${mailbox.id}`);
+      }
+      if (typeof entry === 'function') return entry();
+      return entry;
+    },
+  };
+}
+
+function createFakeEnqueue(): {
+  port: DeltaPollingEnqueuePort;
+  calls: Array<{ mailboxId: string; graphMessageId: string; queuedAt: string }>;
+} {
+  const calls: Array<{
+    mailboxId: string;
+    graphMessageId: string;
+    queuedAt: string;
+  }> = [];
+  const port: DeltaPollingEnqueuePort = {
+    async enqueueMessage(input) {
+      calls.push({ ...input });
+    },
+  };
+  return { port, calls };
+}
+
+interface GraphResponseShape {
+  value?: Array<Record<string, unknown>>;
+  '@odata.nextLink'?: string;
+  '@odata.deltaLink'?: string;
+}
+
+function jsonResponse(payload: GraphResponseShape, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function errorResponse(status: number): Response {
+  return new Response('error', { status });
+}
+
+/**
+ * Build a fetch stub that returns a queue of responses keyed by sequence of
+ * call. Each call shifts the next response off the list; throws if calls
+ * outlive the queue.
+ */
+function fetchStub(
+  scripted: Array<Response | (() => Promise<Response>)>,
+): {
+  fetch: typeof fetch;
+  calls: Array<{ url: string; init?: RequestInit }>;
+} {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const remaining = [...scripted];
+  const fn = vi.fn(async (input: unknown, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : String(input);
+    calls.push({ url, init });
+    const next = remaining.shift();
+    if (next === undefined) {
+      throw new Error(`fetchStub: unexpected extra call to ${url}`);
+    }
+    return typeof next === 'function' ? await next() : next;
+  });
+  return { fetch: fn as unknown as typeof fetch, calls };
+}
+
+function fixedNow(iso: string): () => Date {
+  return () => new Date(iso);
+}
+
+function silentLogger() {
+  return {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  };
+}
+
+function buildDeps(overrides: Partial<DeltaPollingDeps>): DeltaPollingDeps {
+  if (!overrides.repo) throw new Error('repo is required');
+  if (!overrides.accessToken) throw new Error('accessToken is required');
+  if (!overrides.enqueue) throw new Error('enqueue is required');
+  return {
+    repo: overrides.repo,
+    accessToken: overrides.accessToken,
+    enqueue: overrides.enqueue,
+    fetchImpl: overrides.fetchImpl,
+    logger: overrides.logger ?? silentLogger(),
+    now: overrides.now ?? fixedNow('2026-05-29T12:00:00.000Z'),
+    maxPagesPerMailbox: overrides.maxPagesPerMailbox,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('runDeltaPollingOnce — bootstrap', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('does not enqueue any historical messages on first run and saves the deltaLink as cursor', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_bootstrap',
+      emailAddress: 'alpha@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_bootstrap: 'token-A' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const deltaLink =
+      'https://graph.microsoft.com/v1.0/me/mailFolders(%27inbox%27)/messages/delta?$deltatoken=abc';
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        // Bootstrap response carries existing messages — must NOT be enqueued.
+        value: [{ id: 'old-1' }, { id: 'old-2' }],
+        '@odata.deltaLink': deltaLink,
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(enqueueCalls).toEqual([]);
+    expect(state.savedCursors).toHaveLength(1);
+    expect(state.savedCursors[0]).toMatchObject({
+      mailboxId: 'mb_bootstrap',
+      cursorUrl: deltaLink,
+    });
+    expect(state.recordedErrors).toEqual([]);
+    expect(result.bootstrappedMailboxCount).toBe(1);
+    expect(result.enqueuedMessageCount).toBe(0);
+    expect(result.failedMailboxCount).toBe(0);
+
+    // First call must hit the initial delta URL with $select=id and a
+    // Bearer token in the header — no plaintext token in URL.
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe(__internal.buildInitialDeltaUrl());
+    const headers = (fetchCalls[0].init?.headers ?? {}) as Record<string, string>;
+    expect(headers.authorization).toBe('Bearer token-A');
+  });
+});
+
+describe('runDeltaPollingOnce — subsequent polls', () => {
+  it('enqueues every new message id returned from the saved cursor URL', async () => {
+    const savedCursor =
+      'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=old';
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_active',
+      emailAddress: 'beta@example.com',
+      microsoftDeltaCursor: savedCursor,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_active: 'token-B' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const nextDeltaLink =
+      'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=new';
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'new-1' }, { id: 'new-2' }],
+        '@odata.deltaLink': nextDeltaLink,
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        now: fixedNow('2026-05-29T13:00:00.000Z'),
+      }),
+    );
+
+    // Polls the saved cursor URL, not a freshly built initial URL.
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0].url).toBe(savedCursor);
+
+    expect(enqueueCalls).toEqual([
+      {
+        mailboxId: 'mb_active',
+        graphMessageId: 'new-1',
+        queuedAt: '2026-05-29T13:00:00.000Z',
+      },
+      {
+        mailboxId: 'mb_active',
+        graphMessageId: 'new-2',
+        queuedAt: '2026-05-29T13:00:00.000Z',
+      },
+    ]);
+    expect(state.savedCursors).toHaveLength(1);
+    expect(state.savedCursors[0].cursorUrl).toBe(nextDeltaLink);
+    expect(result.enqueuedMessageCount).toBe(2);
+    expect(result.bootstrappedMailboxCount).toBe(0);
+    expect(result.failedMailboxCount).toBe(0);
+  });
+
+  it('follows @odata.nextLink across pages and saves the FINAL @odata.deltaLink', async () => {
+    const savedCursor = 'https://graph.example.com/page-0';
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_pages',
+      emailAddress: 'gamma@example.com',
+      microsoftDeltaCursor: savedCursor,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_pages: 'token-C' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const intermediateNextLink = 'https://graph.example.com/page-1';
+    const finalDeltaLink = 'https://graph.example.com/delta-final';
+
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'p1-m1' }, { id: 'p1-m2' }],
+        '@odata.nextLink': intermediateNextLink,
+      }),
+      jsonResponse({
+        value: [{ id: 'p2-m1' }],
+        '@odata.deltaLink': finalDeltaLink,
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(fetchCalls.map((c) => c.url)).toEqual([
+      savedCursor,
+      intermediateNextLink,
+    ]);
+    expect(enqueueCalls.map((c) => c.graphMessageId)).toEqual([
+      'p1-m1',
+      'p1-m2',
+      'p2-m1',
+    ]);
+    expect(state.savedCursors).toHaveLength(1);
+    expect(state.savedCursors[0].cursorUrl).toBe(finalDeltaLink);
+    expect(result.enqueuedMessageCount).toBe(3);
+  });
+
+  it('skips @removed items and items without an id', async () => {
+    const savedCursor = 'https://graph.example.com/cursor';
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_filter',
+      emailAddress: 'delta@example.com',
+      microsoftDeltaCursor: savedCursor,
+    };
+    const { repo } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_filter: 'token-D' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([
+      jsonResponse({
+        value: [
+          { id: 'good-1' },
+          { id: 'removed-1', '@removed': { reason: 'deleted' } },
+          { id: '' },
+          {},
+          { id: '   ' },
+          { id: 'good-2' },
+        ],
+        '@odata.deltaLink': 'https://graph.example.com/delta',
+      }),
+    ]);
+
+    await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(enqueueCalls.map((c) => c.graphMessageId)).toEqual(['good-1', 'good-2']);
+  });
+});
+
+describe('runDeltaPollingOnce — isolation & errors', () => {
+  it('one mailbox failing does not stop other mailboxes from being polled', async () => {
+    const mailboxes: DeltaPollingMailbox[] = [
+      {
+        id: 'mb_broken',
+        emailAddress: 'epsilon@example.com',
+        microsoftDeltaCursor: 'https://graph.example.com/cursor-broken',
+      },
+      {
+        id: 'mb_healthy',
+        emailAddress: 'zeta@example.com',
+        microsoftDeltaCursor: 'https://graph.example.com/cursor-healthy',
+      },
+    ];
+    const { repo, state } = createFakeRepo(mailboxes);
+    const accessToken = createFakeAccessToken({
+      mb_broken: 'token-broken',
+      mb_healthy: 'token-healthy',
+    });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const healthyDelta = 'https://graph.example.com/delta-healthy';
+    const { fetch: stub } = fetchStub([
+      // First mailbox call → Graph 500
+      errorResponse(500),
+      // Second mailbox call → success
+      jsonResponse({
+        value: [{ id: 'healthy-1' }],
+        '@odata.deltaLink': healthyDelta,
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(result.checkedMailboxCount).toBe(2);
+    expect(result.failedMailboxCount).toBe(1);
+    expect(enqueueCalls).toEqual([
+      {
+        mailboxId: 'mb_healthy',
+        graphMessageId: 'healthy-1',
+        queuedAt: '2026-05-29T12:00:00.000Z',
+      },
+    ]);
+    expect(state.savedCursors).toEqual([
+      {
+        mailboxId: 'mb_healthy',
+        cursorUrl: healthyDelta,
+        polledAt: new Date('2026-05-29T12:00:00.000Z'),
+      },
+    ]);
+    // The broken mailbox's cursor must NOT have been overwritten.
+    expect(
+      state.savedCursors.find((c) => c.mailboxId === 'mb_broken'),
+    ).toBeUndefined();
+    expect(
+      state.recordedErrors.find((e) => e.mailboxId === 'mb_broken'),
+    ).toBeDefined();
+    // 500 is transient — should NOT trigger reconnect.
+    expect(state.reconnectMarked).not.toContain('mb_broken');
+  });
+
+  it('marks mailbox RECONNECT_REQUIRED when Graph returns 401', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_auth_fail',
+      emailAddress: 'eta@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_auth_fail: 'token-stale' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([errorResponse(401)]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(result.failedMailboxCount).toBe(1);
+    expect(enqueueCalls).toEqual([]);
+    expect(state.savedCursors).toEqual([]);
+    expect(state.reconnectMarked).toEqual(['mb_auth_fail']);
+    expect(state.recordedErrors).toHaveLength(1);
+    expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
+  });
+
+  it('marks mailbox RECONNECT_REQUIRED when the access token port throws', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_no_token',
+      emailAddress: 'theta@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken: DeltaPollingAccessTokenPort = {
+      async getAccessTokenForMailbox() {
+        throw new Error('refresh_failed');
+      },
+    };
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub, calls: fetchCalls } = fetchStub([]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // Graph must NEVER be called once the token port has failed.
+    expect(fetchCalls).toHaveLength(0);
+    expect(enqueueCalls).toEqual([]);
+    expect(state.reconnectMarked).toEqual(['mb_no_token']);
+    expect(state.savedCursors).toEqual([]);
+    expect(result.failedMailboxCount).toBe(1);
+  });
+
+  it('stops paging at maxPagesPerMailbox and does not save a cursor', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_runaway',
+      emailAddress: 'iota@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor-0',
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_runaway: 'token-loop' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    // Always returns nextLink, never deltaLink → infinite paging without
+    // the max-pages guard.
+    const looping = async (): Promise<Response> =>
+      jsonResponse({
+        value: [{ id: 'm' }],
+        '@odata.nextLink': 'https://graph.example.com/cursor-next',
+      });
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+      looping,
+    ]);
+
+    await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        maxPagesPerMailbox: 3,
+      }),
+    );
+
+    expect(fetchCalls.length).toBe(3);
+    expect(enqueueCalls).toHaveLength(3);
+    expect(state.savedCursors).toEqual([]);
+  });
+});
+
+describe('runDeltaPollingOnce — security contract', () => {
+  it('uses ONLY the injected enqueue port (no Telegram sender / pipeline call surface)', async () => {
+    // The service has no path to import any telegram or detector code at
+    // runtime. We assert behaviorally here: across a full cycle, the only
+    // outbound channels touched are the injected ports.
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_isolation',
+      emailAddress: 'kappa@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+    };
+    const { repo } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_isolation: 'token-K' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'msg-1' }],
+        '@odata.deltaLink': 'https://graph.example.com/delta-done',
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(result.enqueuedMessageCount).toBe(1);
+    expect(enqueueCalls).toHaveLength(1);
+    // Exactly one HTTP call to Graph; no other network call possible.
+    expect(fetchCalls).toHaveLength(1);
+    // The payload routed to enqueue carries only the safe identifiers.
+    expect(Object.keys(enqueueCalls[0]).sort()).toEqual([
+      'graphMessageId',
+      'mailboxId',
+      'queuedAt',
+    ]);
+  });
+
+  it('handles listing failure without crashing and reports zero work', async () => {
+    const repo: DeltaPollingMailboxRepo = {
+      async listActiveMicrosoftMailboxes() {
+        throw new Error('db unreachable');
+      },
+      async saveDeltaCursor() {},
+      async recordDeltaError() {},
+      async markReconnectRequired() {},
+    };
+    const accessToken = createFakeAccessToken({});
+    const { port: enqueue } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(result).toEqual({
+      checkedMailboxCount: 0,
+      bootstrappedMailboxCount: 0,
+      enqueuedMessageCount: 0,
+      failedMailboxCount: 0,
+    });
+  });
+});

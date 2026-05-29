@@ -1,12 +1,15 @@
 import type { JobsOptions } from 'bullmq';
 
 import {
+  EMAIL_DELTA_POLLING_JOB_SOURCE,
   EMAIL_WEBHOOK_JOB_SOURCE,
   FORBIDDEN_JOB_DATA_KEYS,
+  type EmailDeltaPollingJobData,
   type EmailWebhookJobData,
 } from './email-job.types';
 
 const JOB_ID_PREFIX = 'microsoft-webhook';
+const DELTA_POLLING_JOB_ID_PREFIX = 'delta-polling';
 
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_BACKOFF_DELAY_MS = 5_000;
@@ -109,6 +112,111 @@ export function getDefaultEmailJobOptions(
 ): JobsOptions {
   return {
     jobId: buildEmailJobId(data),
+    attempts: DEFAULT_ATTEMPTS,
+    backoff: {
+      type: 'exponential',
+      delay: DEFAULT_BACKOFF_DELAY_MS,
+    },
+    removeOnComplete: {
+      age: REMOVE_ON_COMPLETE_AGE_SECONDS,
+      count: REMOVE_ON_COMPLETE_COUNT,
+    },
+    removeOnFail: {
+      age: REMOVE_ON_FAIL_AGE_SECONDS,
+      count: REMOVE_ON_FAIL_COUNT,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TASK-031 — Delta polling job validation
+// ---------------------------------------------------------------------------
+
+export class InvalidEmailDeltaPollingJobDataError extends Error {
+  readonly field: string;
+
+  constructor(field: string, message: string) {
+    super(message);
+    this.name = 'InvalidEmailDeltaPollingJobDataError';
+    this.field = field;
+  }
+}
+
+/**
+ * Validates the delta-polling payload before it is pushed onto the email
+ * queue. Throws InvalidEmailDeltaPollingJobDataError on the first failure.
+ * Also enforces that forbidden sensitive keys never appear on the payload.
+ */
+export function validateEmailDeltaPollingJobData(
+  data: unknown,
+): asserts data is EmailDeltaPollingJobData {
+  if (typeof data !== 'object' || data === null) {
+    throw new InvalidEmailDeltaPollingJobDataError(
+      'data',
+      'Delta polling job data must be an object',
+    );
+  }
+  const record = data as Record<string, unknown>;
+
+  if (!isNonEmptyString(record.mailboxId)) {
+    throw new InvalidEmailDeltaPollingJobDataError(
+      'mailboxId',
+      'Delta polling job data is missing mailboxId',
+    );
+  }
+  if (!isNonEmptyString(record.graphMessageId)) {
+    throw new InvalidEmailDeltaPollingJobDataError(
+      'graphMessageId',
+      'Delta polling job data is missing graphMessageId',
+    );
+  }
+  if (!isNonEmptyString(record.queuedAt)) {
+    throw new InvalidEmailDeltaPollingJobDataError(
+      'queuedAt',
+      'Delta polling job data is missing queuedAt timestamp',
+    );
+  }
+  if (record.source !== EMAIL_DELTA_POLLING_JOB_SOURCE) {
+    throw new InvalidEmailDeltaPollingJobDataError(
+      'source',
+      `Delta polling job data source must equal "${EMAIL_DELTA_POLLING_JOB_SOURCE}"`,
+    );
+  }
+
+  for (const forbidden of FORBIDDEN_JOB_DATA_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(record, forbidden)) {
+      throw new InvalidEmailDeltaPollingJobDataError(
+        forbidden,
+        `Delta polling job data must not contain "${forbidden}"`,
+      );
+    }
+  }
+}
+
+/**
+ * Build a stable, deterministic jobId so BullMQ deduplicates retries and
+ * repeated delta-polling discoveries of the same Graph message id. Format:
+ * "delta-polling:{mailboxId}:{graphMessageId}". The distinct prefix from the
+ * webhook job id prefix means a message reported via BOTH webhook and delta
+ * polling will get two queue entries — content-level deduplication happens in
+ * the pipeline (TASK-013).
+ */
+export function buildDeltaPollingJobId(
+  data: EmailDeltaPollingJobData,
+): string {
+  validateEmailDeltaPollingJobData(data);
+  return `${DELTA_POLLING_JOB_ID_PREFIX}:${data.mailboxId}:${data.graphMessageId}`;
+}
+
+/**
+ * Default BullMQ job options for delta-polling-sourced jobs. Same retry/backoff
+ * and retention policy as webhook jobs — the downstream pipeline is identical.
+ */
+export function getDefaultDeltaPollingJobOptions(
+  data: EmailDeltaPollingJobData,
+): JobsOptions {
+  return {
+    jobId: buildDeltaPollingJobId(data),
     attempts: DEFAULT_ATTEMPTS,
     backoff: {
       type: 'exponential',

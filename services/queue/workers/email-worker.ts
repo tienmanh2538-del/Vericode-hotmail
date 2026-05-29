@@ -10,9 +10,10 @@ import {
 } from '@/services/email/graph-message-pipeline.service';
 
 import {
+  EMAIL_DELTA_POLLING_JOB_SOURCE,
   EMAIL_QUEUE_JOB_NAMES,
   EMAIL_QUEUE_NAME,
-  type EmailWebhookJobData,
+  type EmailJobData,
 } from '../email-job.types';
 import { getRedisConnectionOptions } from '../redis-connection';
 
@@ -26,10 +27,22 @@ export type EmailWorkerPipeline = (
  * Translate a BullMQ job payload into the pipeline-facing
  * `GraphMessageProcessingJob` shape. The worker never trusts the body fields
  * for downstream parsing — only the mailbox / message identifiers cross over.
+ *
+ * TASK-031: the same pipeline handles both webhook and delta-polling jobs.
+ * The discriminated union is narrowed by `source`.
  */
 function toPipelineJob(
-  data: EmailWebhookJobData,
+  data: EmailJobData,
 ): GraphMessageProcessingJob {
+  if (data.source === EMAIL_DELTA_POLLING_JOB_SOURCE) {
+    return {
+      mailboxId: data.mailboxId,
+      graphMessageId: data.graphMessageId,
+      source: 'webhook',
+      subscriptionId: null,
+      receivedNotificationAt: data.queuedAt ?? null,
+    };
+  }
   return {
     mailboxId: data.mailboxId,
     graphMessageId: data.graphMessageId,
@@ -65,7 +78,7 @@ export class EmailWorkerProcessingError extends Error {
  * FAILED_TELEGRAM_SEND) so BullMQ retries based on `attempts/backoff`.
  */
 export async function processEmailWebhookJob(
-  job: Job<EmailWebhookJobData>,
+  job: Job<EmailJobData>,
   pipeline: EmailWorkerPipeline = processGraphMessageJob as EmailWorkerPipeline,
 ): Promise<GraphMessagePipelineResult | { acknowledged: true }> {
   if (job.name !== EMAIL_QUEUE_JOB_NAMES.PROCESS_MICROSOFT_GRAPH_MESSAGE) {
@@ -128,13 +141,13 @@ export interface CreateEmailWorkerOptions {
  */
 export function createEmailWorker(
   options: CreateEmailWorkerOptions = {},
-): Worker<EmailWebhookJobData> {
+): Worker<EmailJobData> {
   const { emailQueueName, emailWorkerConcurrency } = loadQueueEnv();
   const queueName = options.queueName ?? emailQueueName ?? EMAIL_QUEUE_NAME;
   const concurrency = options.concurrency ?? emailWorkerConcurrency;
   const pipeline = options.pipeline;
 
-  const worker = new Worker<EmailWebhookJobData>(
+  const worker = new Worker<EmailJobData>(
     queueName,
     (job) => processEmailWebhookJob(job, pipeline),
     {

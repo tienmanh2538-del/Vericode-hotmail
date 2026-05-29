@@ -22,6 +22,9 @@ export interface EnvValues {
   REDIS_URL?: string;
   EMAIL_QUEUE_NAME?: string;
   EMAIL_WORKER_CONCURRENCY?: string;
+  DELTA_POLLING_ENABLED?: string;
+  DELTA_POLLING_INTERVAL_SECONDS?: string;
+  DELTA_POLLING_MAX_PAGES_PER_MAILBOX?: string;
 }
 
 export interface EnvLoadResult {

@@ -6,6 +6,7 @@ import { createLogger } from '@/lib/logger';
 import {
   EMAIL_QUEUE_JOB_NAMES,
   EMAIL_QUEUE_NAME,
+  type EmailJobData,
   type EmailWebhookJobData,
 } from './email-job.types';
 import {
@@ -28,7 +29,9 @@ export interface EmailQueueLike {
   ) => Promise<{ id?: string | null }>;
 }
 
-type EmailQueue = Queue<EmailWebhookJobData>;
+// TASK-031 — Both webhook and delta-polling payloads land on the same BullMQ
+// queue so the existing TASK-027 worker pipeline processes them uniformly.
+type EmailQueue = Queue<EmailJobData>;
 
 let cachedQueue: EmailQueue | null = null;
 
@@ -44,7 +47,7 @@ function resolveQueueName(): string {
  */
 export function getEmailQueue(): EmailQueue {
   if (cachedQueue !== null) return cachedQueue;
-  const queue: EmailQueue = new Queue<EmailWebhookJobData>(resolveQueueName(), {
+  const queue: EmailQueue = new Queue<EmailJobData>(resolveQueueName(), {
     connection: getRedisConnectionOptions(),
     defaultJobOptions: {
       removeOnComplete: true,

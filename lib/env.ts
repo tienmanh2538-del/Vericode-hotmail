@@ -75,6 +75,13 @@ export function loadEnv(
     REDIS_URL: pickString(source.REDIS_URL),
     EMAIL_QUEUE_NAME: pickString(source.EMAIL_QUEUE_NAME),
     EMAIL_WORKER_CONCURRENCY: pickString(source.EMAIL_WORKER_CONCURRENCY),
+    DELTA_POLLING_ENABLED: pickString(source.DELTA_POLLING_ENABLED),
+    DELTA_POLLING_INTERVAL_SECONDS: pickString(
+      source.DELTA_POLLING_INTERVAL_SECONDS,
+    ),
+    DELTA_POLLING_MAX_PAGES_PER_MAILBOX: pickString(
+      source.DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
+    ),
   };
 
   return { values, warnings };
@@ -176,6 +183,56 @@ export function loadQueueEnv(values: EnvValues = loadEnv().values): {
     }
   }
   return { redisUrl, emailQueueName, emailWorkerConcurrency };
+}
+
+// TASK-031 — delta polling backup worker config. Defaults mirror the spec:
+// enabled by default, 30s interval, max 10 Graph delta pages per mailbox.
+const DEFAULT_DELTA_POLLING_ENABLED = true;
+const DEFAULT_DELTA_POLLING_INTERVAL_SECONDS = 30;
+const DEFAULT_DELTA_POLLING_MAX_PAGES_PER_MAILBOX = 10;
+const MIN_DELTA_POLLING_INTERVAL_SECONDS = 5;
+const MIN_DELTA_POLLING_MAX_PAGES = 1;
+
+function parseBoolEnv(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes') return true;
+  if (normalized === 'false' || normalized === '0' || normalized === 'no') return false;
+  return fallback;
+}
+
+function parsePositiveIntEnv(
+  raw: string | undefined,
+  fallback: number,
+  minimum: number,
+): number {
+  if (raw === undefined) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < minimum) return minimum;
+  return parsed;
+}
+
+export function loadDeltaPollingEnv(values: EnvValues = loadEnv().values): {
+  enabled: boolean;
+  intervalSeconds: number;
+  maxPagesPerMailbox: number;
+} {
+  const enabled = parseBoolEnv(
+    values.DELTA_POLLING_ENABLED,
+    DEFAULT_DELTA_POLLING_ENABLED,
+  );
+  const intervalSeconds = parsePositiveIntEnv(
+    values.DELTA_POLLING_INTERVAL_SECONDS,
+    DEFAULT_DELTA_POLLING_INTERVAL_SECONDS,
+    MIN_DELTA_POLLING_INTERVAL_SECONDS,
+  );
+  const maxPagesPerMailbox = parsePositiveIntEnv(
+    values.DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
+    DEFAULT_DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
+    MIN_DELTA_POLLING_MAX_PAGES,
+  );
+  return { enabled, intervalSeconds, maxPagesPerMailbox };
 }
 
 export type { AppEnv, EnvLoadResult, EnvValues, LogLevel, EnvKey };
