@@ -25,6 +25,9 @@ export interface EnvValues {
   DELTA_POLLING_ENABLED?: string;
   DELTA_POLLING_INTERVAL_SECONDS?: string;
   DELTA_POLLING_MAX_PAGES_PER_MAILBOX?: string;
+  SUBSCRIPTION_RENEWAL_ENABLED?: string;
+  SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS?: string;
+  SUBSCRIPTION_RENEWAL_WINDOW_HOURS?: string;
 }
 
 export interface EnvLoadResult {

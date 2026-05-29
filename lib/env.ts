@@ -82,6 +82,15 @@ export function loadEnv(
     DELTA_POLLING_MAX_PAGES_PER_MAILBOX: pickString(
       source.DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
     ),
+    SUBSCRIPTION_RENEWAL_ENABLED: pickString(
+      source.SUBSCRIPTION_RENEWAL_ENABLED,
+    ),
+    SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS: pickString(
+      source.SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS,
+    ),
+    SUBSCRIPTION_RENEWAL_WINDOW_HOURS: pickString(
+      source.SUBSCRIPTION_RENEWAL_WINDOW_HOURS,
+    ),
   };
 
   return { values, warnings };
@@ -233,6 +242,45 @@ export function loadDeltaPollingEnv(values: EnvValues = loadEnv().values): {
     MIN_DELTA_POLLING_MAX_PAGES,
   );
   return { enabled, intervalSeconds, maxPagesPerMailbox };
+}
+
+// TASK-032 — subscription renewal worker config. Defaults mirror the spec:
+// enabled by default, runs every 15 minutes, renews when a subscription has
+// <= 24h left before Microsoft expires it.
+const DEFAULT_SUBSCRIPTION_RENEWAL_ENABLED = true;
+const DEFAULT_SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS = 15 * 60;
+const DEFAULT_SUBSCRIPTION_RENEWAL_WINDOW_HOURS = 24;
+const MIN_SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS = 60;
+const MIN_SUBSCRIPTION_RENEWAL_WINDOW_HOURS = 1;
+
+export function loadSubscriptionRenewalEnv(
+  values: EnvValues = loadEnv().values,
+): {
+  enabled: boolean;
+  intervalSeconds: number;
+  windowHours: number;
+  renewWithinMs: number;
+} {
+  const enabled = parseBoolEnv(
+    values.SUBSCRIPTION_RENEWAL_ENABLED,
+    DEFAULT_SUBSCRIPTION_RENEWAL_ENABLED,
+  );
+  const intervalSeconds = parsePositiveIntEnv(
+    values.SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS,
+    DEFAULT_SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS,
+    MIN_SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS,
+  );
+  const windowHours = parsePositiveIntEnv(
+    values.SUBSCRIPTION_RENEWAL_WINDOW_HOURS,
+    DEFAULT_SUBSCRIPTION_RENEWAL_WINDOW_HOURS,
+    MIN_SUBSCRIPTION_RENEWAL_WINDOW_HOURS,
+  );
+  return {
+    enabled,
+    intervalSeconds,
+    windowHours,
+    renewWithinMs: windowHours * 60 * 60 * 1000,
+  };
 }
 
 export type { AppEnv, EnvLoadResult, EnvValues, LogLevel, EnvKey };
