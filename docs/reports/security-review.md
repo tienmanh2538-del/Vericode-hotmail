@@ -6,8 +6,7 @@
   logging).
 - **Reviewer:** Claude Code (coder). Independent review pending (Gemini).
 - **Date:** 2026-05-30
-- **Branch:** `feature/task-036-security-hardening-review`
-
+- **Branch:** TASK-036 feature branch
 > This review covers TASK-036 only. It does **not** perform TASK-037/038
 > (E2E), TASK-039 (staging) or TASK-040 (acceptance). No Microsoft scope was
 > added or changed. No `.env` / `.env.local` content was read, printed, or
