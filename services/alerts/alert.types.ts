@@ -39,7 +39,11 @@ export interface Alert {
 }
 
 /** Why an alert was not delivered. Never an exception — alerts never throw. */
-export type AlertSkipReason = 'not_configured' | 'no_bot_token' | 'send_failed';
+export type AlertSkipReason =
+  | 'not_configured'
+  | 'no_bot_token'
+  | 'send_failed'
+  | 'cooldown';
 
 export type AlertDeliveryResult =
   | { delivered: true; chatId: string }

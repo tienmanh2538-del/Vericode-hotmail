@@ -345,4 +345,64 @@ describe('createRetryingTelegramSendPort — pipeline adapter', () => {
       statusCode: 503,
     });
   });
+
+  it('emits an exhausted-failure alert before throwing (TASK-035)', async () => {
+    const send = vi.fn(async () => {
+      throw apiError(503);
+    });
+    const { sleep } = makeFakeSleep();
+    const onExhaustedFailure = vi.fn();
+
+    const port = createRetryingTelegramSendPort(
+      { send, sleep, retryDelaysMs: FAST_DELAYS },
+      { onExhaustedFailure, alertContext: { mailboxId: 'mbx_1' } },
+    );
+
+    await expect(
+      port.sendTelegramMessage({ chatId: CHAT_ID, text: 'hi' }),
+    ).rejects.toMatchObject({ name: 'TelegramSendError', statusCode: 503 });
+
+    expect(onExhaustedFailure).toHaveBeenCalledTimes(1);
+    expect(onExhaustedFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: CHAT_ID,
+        attempts: 4,
+        statusCode: 503,
+      }),
+    );
+  });
+
+  it('does not emit an alert on success', async () => {
+    const send = vi.fn(async () => okResult());
+    const { sleep } = makeFakeSleep();
+    const onExhaustedFailure = vi.fn();
+
+    const port = createRetryingTelegramSendPort(
+      { send, sleep, retryDelaysMs: FAST_DELAYS },
+      { onExhaustedFailure },
+    );
+
+    await port.sendTelegramMessage({ chatId: CHAT_ID, text: 'hi' });
+    expect(onExhaustedFailure).not.toHaveBeenCalled();
+  });
+
+  it('still throws even if the alert hook itself throws', async () => {
+    const send = vi.fn(async () => {
+      throw apiError(503);
+    });
+    const { sleep } = makeFakeSleep();
+    const onExhaustedFailure = vi.fn(() => {
+      throw new Error('alert backend down');
+    });
+
+    const port = createRetryingTelegramSendPort(
+      { send, sleep, retryDelaysMs: FAST_DELAYS },
+      { onExhaustedFailure },
+    );
+
+    await expect(
+      port.sendTelegramMessage({ chatId: CHAT_ID, text: 'hi' }),
+    ).rejects.toMatchObject({ name: 'TelegramSendError', statusCode: 503 });
+    expect(onExhaustedFailure).toHaveBeenCalledTimes(1);
+  });
 });

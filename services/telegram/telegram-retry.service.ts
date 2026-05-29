@@ -16,6 +16,8 @@
 //   - Returns a discriminated result; it never throws on a delivery failure.
 
 import { createLogger, type Logger } from '@/lib/logger';
+import { sendAdminAlert } from '@/services/alerts/alert.service';
+import type { AlertDeliveryResult } from '@/services/alerts/alert.types';
 import {
   sendTelegramMessage,
   TelegramSendError,
@@ -162,6 +164,31 @@ export async function sendTelegramMessageWithRetry(
   };
 }
 
+/** Safe metadata describing an exhausted/permanent Telegram delivery failure. */
+export interface TelegramExhaustedFailure {
+  chatId: string;
+  attempts: number;
+  failureReason: string;
+  statusCode?: number;
+}
+
+export interface RetryingPortAlertOptions {
+  /**
+   * Called once when delivery is permanently exhausted, just before the adapter
+   * throws. Injectable so tests can assert the alert fires without a network
+   * send. Defaults to emitting a CRITICAL `TELEGRAM_SEND_FAILED` admin alert.
+   * Must never throw — the adapter guards it regardless.
+   */
+  onExhaustedFailure?: (
+    failure: TelegramExhaustedFailure,
+  ) => void | Promise<void>;
+  /**
+   * Extra pre-masked context merged into the alert (e.g. mailboxId). Passed to
+   * the logger/formatter, which also mask sensitive keys.
+   */
+  alertContext?: Record<string, unknown>;
+}
+
 /**
  * Adapter that exposes the retrying sender as a drop-in for the email
  * pipeline's `TelegramSendPort` (which expects `sendTelegramMessage` to resolve
@@ -171,16 +198,40 @@ export async function sendTelegramMessageWithRetry(
  * the pipeline keeps recording its existing `FAILED_TELEGRAM_SEND` /
  * `TELEGRAM_SEND_FAILED` status unchanged.
  *
- * TODO(TASK-035): surface the failure outcome to the alert service hook here
- * once the full alert pipeline lands. Keep it side-effect-free until then.
+ * TASK-035: on exhausted/permanent failure it ALSO emits an admin alert (the
+ * clearest critical-failure integration point) before throwing. Alerting is
+ * fully guarded — it never throws, never blocks the original failure, and never
+ * loops (the default alert sender reuses the same low-level `send` and performs
+ * a single attempt, so a Telegram outage cannot trigger an alert storm).
  */
 export function createRetryingTelegramSendPort(
   options: TelegramRetryOptions = {},
+  alertOptions: RetryingPortAlertOptions = {},
 ): {
   sendTelegramMessage: (
     input: SendTelegramMessageInput,
   ) => Promise<SendTelegramMessageResult>;
 } {
+  const emitFailureAlert =
+    alertOptions.onExhaustedFailure ??
+    ((failure: TelegramExhaustedFailure): Promise<AlertDeliveryResult> =>
+      sendAdminAlert(
+        {
+          type: 'TELEGRAM_SEND_FAILED',
+          severity: 'CRITICAL',
+          title: 'Telegram send failed after retries',
+          context: {
+            failedChatId: failure.chatId,
+            attempts: failure.attempts,
+            failureReason: failure.failureReason,
+            statusCode: failure.statusCode,
+            ...alertOptions.alertContext,
+          },
+        },
+        // Reuse the same low-level send so unit tests never touch the network.
+        { send: options.send },
+      ));
+
   return {
     async sendTelegramMessage(
       input: SendTelegramMessageInput,
@@ -193,6 +244,18 @@ export function createRetryingTelegramSendPort(
           messageId: outcome.telegramMessageId,
         };
       }
+
+      try {
+        await emitFailureAlert({
+          chatId: outcome.chatId,
+          attempts: outcome.attempts,
+          failureReason: outcome.failureReason,
+          statusCode: outcome.statusCode,
+        });
+      } catch {
+        // Alerting must never mask or replace the original delivery failure.
+      }
+
       throw new TelegramSendError('telegram_api', 'Telegram send failed', {
         statusCode: outcome.statusCode,
       });
