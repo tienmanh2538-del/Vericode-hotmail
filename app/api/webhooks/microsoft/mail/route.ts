@@ -1,5 +1,10 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createLogger } from '@/lib/logger';
+import {
+  handleMicrosoftGraphNotifications,
+  parseNotificationCollection,
+  type WebhookNotificationDeps,
+} from '@/services/microsoft/webhook-notification.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,31 +22,26 @@ function buildValidationResponse(validationToken: string): Response {
   });
 }
 
-// Placeholder for TASK-025: real Microsoft Graph notification handling
-// (clientState verification, payload parsing, queue dispatch, Telegram, etc.)
-// will be implemented there. In TASK-024 we deliberately do NOT:
-//   - parse the request body,
-//   - call Microsoft Graph,
-//   - enqueue work,
-//   - send Telegram messages.
-function buildPlaceholderResponse(): NextResponse {
-  return NextResponse.json(
-    {
-      ok: true,
-      received: true,
-      message: 'Notification handling will be implemented in TASK-025',
-    },
-    { status: 202 },
-  );
-}
-
 function getValidationToken(request: NextRequest): string | null {
   const token = new URL(request.url).searchParams.get(VALIDATION_TOKEN_PARAM);
   if (typeof token !== 'string' || token.length === 0) return null;
   return token;
 }
 
-export async function POST(request: NextRequest): Promise<Response> {
+async function readJsonSafely(request: NextRequest): Promise<unknown | undefined> {
+  try {
+    const text = await request.text();
+    if (text.length === 0) return undefined;
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+async function handleWebhookRequest(
+  request: NextRequest,
+  deps: WebhookNotificationDeps = {},
+): Promise<Response> {
   const validationToken = getValidationToken(request);
 
   if (validationToken !== null) {
@@ -51,11 +51,43 @@ export async function POST(request: NextRequest): Promise<Response> {
     return buildValidationResponse(validationToken);
   }
 
-  logger.info('Microsoft webhook POST received without validationToken', {
-    method: 'POST',
-    note: 'placeholder until TASK-025',
-  });
-  return buildPlaceholderResponse();
+  const rawBody = await readJsonSafely(request);
+  const collection = parseNotificationCollection(rawBody);
+  if (collection === null) {
+    logger.warn('Microsoft webhook received malformed notification body');
+    return NextResponse.json(
+      { ok: false, error: 'Invalid Microsoft Graph notification payload' },
+      { status: 400 },
+    );
+  }
+
+  try {
+    const result = await handleMicrosoftGraphNotifications(collection, deps);
+    logger.info('Microsoft webhook notification batch handled', {
+      received: result.received,
+      accepted: result.accepted.length,
+      skipped: result.skipped.length,
+    });
+    return NextResponse.json(
+      {
+        ok: true,
+        received: result.received,
+        accepted: result.accepted.length,
+        skipped: result.skipped.length,
+      },
+      { status: 202 },
+    );
+  } catch {
+    logger.error('Microsoft webhook notification handling failed');
+    return NextResponse.json(
+      { ok: false, error: 'Webhook notification handling failed' },
+      { status: 500 },
+    );
+  }
+}
+
+export async function POST(request: NextRequest): Promise<Response> {
+  return handleWebhookRequest(request);
 }
 
 export async function GET(request: NextRequest): Promise<Response> {

@@ -60,26 +60,22 @@ describe('POST /api/webhooks/microsoft/mail — validationToken handling', () =>
 });
 
 describe('POST /api/webhooks/microsoft/mail — without validationToken (Case 4)', () => {
-  it('returns 202 placeholder response without throwing', async () => {
+  it('returns 400 when there is no JSON body to parse', async () => {
     const response = await POST(makePostRequest());
 
-    expect(response.status).toBe(202);
+    expect(response.status).toBe(400);
     const contentType = response.headers.get('content-type') ?? '';
     expect(contentType).toContain('application/json');
 
-    const payload = (await response.json()) as {
-      ok: boolean;
-      received: boolean;
-      message: string;
-    };
-    expect(payload.ok).toBe(true);
-    expect(payload.received).toBe(true);
-    expect(payload.message).toContain('TASK-025');
+    const payload = (await response.json()) as { ok: boolean; error: string };
+    expect(payload.ok).toBe(false);
+    expect(payload.error).toContain('Invalid');
   });
 
-  it('treats empty validationToken as missing', async () => {
+  it('treats empty validationToken as missing and still parses body', async () => {
     const response = await POST(makePostRequest('validationToken='));
-    expect(response.status).toBe(202);
+    // Empty body with no validationToken → invalid payload.
+    expect(response.status).toBe(400);
   });
 });
 
