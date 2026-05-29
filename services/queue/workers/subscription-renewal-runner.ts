@@ -11,6 +11,7 @@ import {
   RefreshAccessTokenError,
   refreshMicrosoftAccessToken,
 } from '@/services/microsoft/refresh-access-token.service';
+import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
 import { renewGraphSubscription } from '@/services/microsoft/graph-subscription.service';
 import { createAuditLog } from '@/services/logs/audit-log.service';
 import {
@@ -135,6 +136,10 @@ interface MailboxRefreshTokenSlice {
 interface MailboxRefreshTokenPrismaClient {
   mailbox: {
     findUnique: (args: unknown) => Promise<MailboxRefreshTokenSlice | null>;
+    update: (args: {
+      where: { id: string };
+      data: Record<string, unknown>;
+    }) => Promise<unknown>;
   };
 }
 
@@ -169,6 +174,12 @@ export function createPrismaRenewalAccessTokenPort(
 
       try {
         const exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
+        // TASK-036 — persist a rotated refresh token (encrypted) so renewal does
+        // not silently lose mailbox access on the next cycle. No-op when
+        // Microsoft did not return a new token.
+        await persistRotatedRefreshToken(mailboxId, exchanged.refreshToken, {
+          prisma: client,
+        });
         return exchanged.accessToken;
       } catch (error) {
         if (error instanceof RefreshAccessTokenError) {

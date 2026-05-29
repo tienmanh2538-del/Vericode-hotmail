@@ -153,6 +153,7 @@ function buildDeps(overrides: Partial<DeltaPollingDeps>): DeltaPollingDeps {
     logger: overrides.logger ?? silentLogger(),
     now: overrides.now ?? fixedNow('2026-05-29T12:00:00.000Z'),
     maxPagesPerMailbox: overrides.maxPagesPerMailbox,
+    bootstrapLookbackHours: overrides.bootstrapLookbackHours,
   };
 }
 
@@ -200,11 +201,89 @@ describe('runDeltaPollingOnce — bootstrap', () => {
     expect(result.failedMailboxCount).toBe(0);
 
     // First call must hit the initial delta URL with $select=id and a
-    // Bearer token in the header — no plaintext token in URL.
+    // Bearer token in the header — no plaintext token in URL. TASK-036: the
+    // bootstrap URL is time-bounded (now - default 24h lookback).
     expect(fetchCalls).toHaveLength(1);
-    expect(fetchCalls[0].url).toBe(__internal.buildInitialDeltaUrl());
+    const expectedFromDate = new Date('2026-05-28T12:00:00.000Z');
+    expect(fetchCalls[0].url).toBe(
+      __internal.buildInitialDeltaUrl(expectedFromDate),
+    );
     const headers = (fetchCalls[0].init?.headers ?? {}) as Record<string, string>;
     expect(headers.authorization).toBe('Bearer token-A');
+  });
+
+  it('TASK-036: bounds the first bootstrap scan with a receivedDateTime filter', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_big',
+      emailAddress: 'huge@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_big: 'token-big' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const deltaLink = 'https://graph.example.com/delta-after-bootstrap';
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'recent-1' }],
+        '@odata.deltaLink': deltaLink,
+      }),
+    ]);
+
+    await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        // 6h lookback → from 2026-05-29T06:00:00Z.
+        bootstrapLookbackHours: 6,
+        now: fixedNow('2026-05-29T12:00:00.000Z'),
+      }),
+    );
+
+    // The bootstrap URL must carry a receivedDateTime ge filter so a very large
+    // mailbox is not scanned from the beginning of time. (URLSearchParams encodes
+    // the spaces as '+', so compare against the canonical builder output.)
+    const firstUrl = fetchCalls[0].url;
+    expect(firstUrl).toContain('messages/delta');
+    expect(firstUrl).toBe(
+      __internal.buildInitialDeltaUrl(new Date('2026-05-29T06:00:00.000Z')),
+    );
+    expect(decodeURIComponent(firstUrl)).toContain(
+      'receivedDateTime+ge+2026-05-29T06:00:00.000Z',
+    );
+    // Still does not enqueue historical messages, and converges to a cursor.
+    expect(enqueueCalls).toEqual([]);
+    expect(state.savedCursors[0].cursorUrl).toBe(deltaLink);
+  });
+
+  it('TASK-036: an unbounded mailbox stops at the page cap and never fetches forever', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_no_converge',
+      emailAddress: 'forever@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_no_converge: 'token-x' });
+    const { port: enqueue } = createFakeEnqueue();
+    // Bootstrap pages that never reach a deltaLink.
+    const looping = async (): Promise<Response> =>
+      jsonResponse({
+        value: [{ id: 'old' }],
+        '@odata.nextLink': 'https://graph.example.com/next',
+      });
+    const { fetch: stub, calls: fetchCalls } = fetchStub(
+      Array.from({ length: 20 }, () => looping),
+    );
+
+    await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub, maxPagesPerMailbox: 4 }),
+    );
+
+    // Hard bound: never exceeds the page cap, even with no deltaLink in sight.
+    expect(fetchCalls.length).toBe(4);
+    // No cursor saved on a non-converging bootstrap (no deltaLink reached).
+    expect(state.savedCursors).toEqual([]);
   });
 });
 

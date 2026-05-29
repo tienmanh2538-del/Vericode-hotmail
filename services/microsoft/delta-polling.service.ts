@@ -25,6 +25,14 @@ const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 const INBOX_DELTA_PATH = "/me/mailFolders('inbox')/messages/delta";
 const DELTA_PAGE_TOP = '50';
 const DEFAULT_MAX_PAGES_PER_MAILBOX = 10;
+// TASK-036 — first-run (bootstrap) safety. Without a cursor, an unbounded delta
+// query walks the ENTIRE mailbox to reach the first @odata.deltaLink. On a very
+// large mailbox that never converges within the page cap, so the cursor is never
+// saved and every cycle re-scans from scratch. We bound the initial scan with a
+// receivedDateTime filter — supported by Graph on the messages delta query
+// ($filter=receivedDateTime ge {ts}, itself capped at 5,000 messages).
+const DEFAULT_BOOTSTRAP_LOOKBACK_HOURS = 24;
+const MS_PER_HOUR = 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Public types & ports
@@ -74,6 +82,12 @@ export interface DeltaPollingDeps {
   logger?: Logger;
   now?: () => Date;
   maxPagesPerMailbox?: number;
+  /**
+   * TASK-036 — how far back the FIRST (bootstrap) sync of a mailbox is allowed
+   * to scan, in hours. Applied as $filter=receivedDateTime ge (now - hours) on
+   * the initial delta request only. Ignored once a deltaLink cursor exists.
+   */
+  bootstrapLookbackHours?: number;
 }
 
 export interface DeltaPollingRunResult {
@@ -133,10 +147,15 @@ function readOptionalString(value: unknown): string | undefined {
   return trimmed.length === 0 ? undefined : trimmed;
 }
 
-function buildInitialDeltaUrl(): string {
+function buildInitialDeltaUrl(bootstrapFromDate?: Date): string {
   // $select=id keeps the payload minimal — we never read bodies in this layer.
   // $top is honored by Graph as a hint; the server caps it.
   const params = new URLSearchParams({ $select: 'id', $top: DELTA_PAGE_TOP });
+  if (bootstrapFromDate) {
+    // Bound the first sync to recent mail so a huge mailbox converges to a
+    // deltaLink quickly. Graph only supports receivedDateTime ge/gt here.
+    params.set('$filter', `receivedDateTime ge ${bootstrapFromDate.toISOString()}`);
+  }
   return `${GRAPH_BASE_URL}${INBOX_DELTA_PATH}?${params.toString()}`;
 }
 
@@ -228,10 +247,12 @@ async function pollMailboxDelta(
     Pick<DeltaPollingDeps, 'fetchImpl' | 'logger' | 'now' | 'maxPagesPerMailbox'>
   > & {
     enqueue: DeltaPollingEnqueuePort;
+    bootstrapFromDate: Date;
   },
 ): Promise<PerMailboxPollOutcome> {
   const isBootstrap = mailbox.microsoftDeltaCursor === null;
-  let currentUrl = mailbox.microsoftDeltaCursor ?? buildInitialDeltaUrl();
+  let currentUrl =
+    mailbox.microsoftDeltaCursor ?? buildInitialDeltaUrl(deps.bootstrapFromDate);
   let pagesProcessed = 0;
   let enqueued = 0;
   let deltaLink: string | null = null;
@@ -313,6 +334,11 @@ export async function runDeltaPollingOnce(
     typeof deps.maxPagesPerMailbox === 'number' && deps.maxPagesPerMailbox > 0
       ? Math.floor(deps.maxPagesPerMailbox)
       : DEFAULT_MAX_PAGES_PER_MAILBOX;
+  const bootstrapLookbackHours =
+    typeof deps.bootstrapLookbackHours === 'number' &&
+    deps.bootstrapLookbackHours > 0
+      ? deps.bootstrapLookbackHours
+      : DEFAULT_BOOTSTRAP_LOOKBACK_HOURS;
 
   const result: DeltaPollingRunResult = {
     checkedMailboxCount: 0,
@@ -334,6 +360,7 @@ export async function runDeltaPollingOnce(
   logger.info('Delta polling cycle started', {
     activeMailboxCount: mailboxes.length,
     maxPagesPerMailbox,
+    bootstrapLookbackHours,
   });
 
   for (const mailbox of mailboxes) {
@@ -356,12 +383,16 @@ export async function runDeltaPollingOnce(
         continue;
       }
 
+      const bootstrapFromDate = new Date(
+        startedAt.getTime() - bootstrapLookbackHours * MS_PER_HOUR,
+      );
       const outcome = await pollMailboxDelta(mailbox, accessToken, {
         fetchImpl,
         logger,
         now,
         maxPagesPerMailbox,
         enqueue: deps.enqueue,
+        bootstrapFromDate,
       });
 
       if (outcome.bootstrap) {
@@ -457,6 +488,7 @@ export const __internal = {
   GRAPH_BASE_URL,
   INBOX_DELTA_PATH,
   DEFAULT_MAX_PAGES_PER_MAILBOX,
+  DEFAULT_BOOTSTRAP_LOOKBACK_HOURS,
   buildInitialDeltaUrl,
   isValidMessageItem,
   maskEmail,

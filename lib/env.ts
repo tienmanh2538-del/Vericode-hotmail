@@ -82,6 +82,9 @@ export function loadEnv(
     DELTA_POLLING_MAX_PAGES_PER_MAILBOX: pickString(
       source.DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
     ),
+    DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS: pickString(
+      source.DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS,
+    ),
     SUBSCRIPTION_RENEWAL_ENABLED: pickString(
       source.SUBSCRIPTION_RENEWAL_ENABLED,
     ),
@@ -201,6 +204,13 @@ const DEFAULT_DELTA_POLLING_INTERVAL_SECONDS = 30;
 const DEFAULT_DELTA_POLLING_MAX_PAGES_PER_MAILBOX = 10;
 const MIN_DELTA_POLLING_INTERVAL_SECONDS = 5;
 const MIN_DELTA_POLLING_MAX_PAGES = 1;
+// TASK-036 — bootstrap (first-run) delta sync is time-bounded so a very large
+// mailbox never triggers an unbounded historical scan. Microsoft Graph supports
+// $filter=receivedDateTime ge {ts} on the messages delta query (and caps such a
+// filtered query at 5,000 messages). Default: 24h lookback. Safe default keeps
+// local dev / CI working with no env set.
+const DEFAULT_DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS = 24;
+const MIN_DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS = 1;
 
 function parseBoolEnv(raw: string | undefined, fallback: boolean): boolean {
   if (raw === undefined) return fallback;
@@ -226,6 +236,7 @@ export function loadDeltaPollingEnv(values: EnvValues = loadEnv().values): {
   enabled: boolean;
   intervalSeconds: number;
   maxPagesPerMailbox: number;
+  bootstrapLookbackHours: number;
 } {
   const enabled = parseBoolEnv(
     values.DELTA_POLLING_ENABLED,
@@ -241,7 +252,12 @@ export function loadDeltaPollingEnv(values: EnvValues = loadEnv().values): {
     DEFAULT_DELTA_POLLING_MAX_PAGES_PER_MAILBOX,
     MIN_DELTA_POLLING_MAX_PAGES,
   );
-  return { enabled, intervalSeconds, maxPagesPerMailbox };
+  const bootstrapLookbackHours = parsePositiveIntEnv(
+    values.DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS,
+    DEFAULT_DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS,
+    MIN_DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS,
+  );
+  return { enabled, intervalSeconds, maxPagesPerMailbox, bootstrapLookbackHours };
 }
 
 // TASK-032 — subscription renewal worker config. Defaults mirror the spec:

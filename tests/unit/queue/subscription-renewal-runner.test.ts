@@ -7,6 +7,7 @@ import { SubscriptionRenewalTokenError } from '@/services/microsoft/subscription
 // classification logic deterministically.
 const refreshMock = vi.fn();
 const decryptMock = vi.fn();
+const encryptMock = vi.fn();
 
 vi.mock('@/services/microsoft/refresh-access-token.service', async () => {
   const actual = await vi.importActual<
@@ -20,6 +21,7 @@ vi.mock('@/services/microsoft/refresh-access-token.service', async () => {
 
 vi.mock('@/lib/security/encryption', () => ({
   decryptSecret: (...args: unknown[]) => decryptMock(...args),
+  encryptSecret: (...args: unknown[]) => encryptMock(...args),
 }));
 
 // Imported after the mocks are registered.
@@ -32,6 +34,7 @@ function mailboxClient(encryptedRefreshToken: string | null) {
   return {
     mailbox: {
       findUnique: vi.fn(async () => ({ encryptedRefreshToken })),
+      update: vi.fn(async () => ({})),
     },
   };
 }
@@ -39,16 +42,38 @@ function mailboxClient(encryptedRefreshToken: string | null) {
 beforeEach(() => {
   refreshMock.mockReset();
   decryptMock.mockReset();
+  encryptMock.mockReset();
 });
 
 describe('createPrismaRenewalAccessTokenPort', () => {
   it('returns the access token on a successful refresh', async () => {
     decryptMock.mockReturnValue('plaintext-refresh');
     refreshMock.mockResolvedValue({ accessToken: 'fresh-access-token' });
-    const port = createPrismaRenewalAccessTokenPort(mailboxClient('cipher') as never);
+    const client = mailboxClient('cipher');
+    const port = createPrismaRenewalAccessTokenPort(client as never);
 
     await expect(port.getAccessTokenForMailbox('mb_1')).resolves.toBe('fresh-access-token');
     expect(decryptMock).toHaveBeenCalledWith('cipher');
+    // No rotated token returned → existing encrypted token is kept untouched.
+    expect(client.mailbox.update).not.toHaveBeenCalled();
+  });
+
+  it('TASK-036: persists a rotated refresh token (encrypted) when Microsoft returns one', async () => {
+    decryptMock.mockReturnValue('plaintext-refresh');
+    refreshMock.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      refreshToken: 'rotated-refresh',
+    });
+    encryptMock.mockReturnValue('enc(rotated-refresh)');
+    const client = mailboxClient('cipher');
+    const port = createPrismaRenewalAccessTokenPort(client as never);
+
+    await expect(port.getAccessTokenForMailbox('mb_1')).resolves.toBe('fresh-access-token');
+    expect(encryptMock).toHaveBeenCalledWith('rotated-refresh');
+    expect(client.mailbox.update).toHaveBeenCalledTimes(1);
+    const data = (client.mailbox.update as ReturnType<typeof vi.fn>).mock.calls[0][0]
+      .data as Record<string, unknown>;
+    expect(data.encryptedRefreshToken).toBe('enc(rotated-refresh)');
   });
 
   it('maps a missing refresh token to reconnect_required', async () => {

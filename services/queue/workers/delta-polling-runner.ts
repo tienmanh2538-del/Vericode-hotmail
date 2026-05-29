@@ -8,6 +8,7 @@ import { decryptSecret } from '@/lib/security/encryption';
 import { createLogger, type Logger } from '@/lib/logger';
 import { loadDeltaPollingEnv } from '@/lib/env';
 import { refreshMicrosoftAccessToken } from '@/services/microsoft/refresh-access-token.service';
+import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
 import {
   runDeltaPollingOnce,
   type DeltaPollingAccessTokenPort,
@@ -150,9 +151,12 @@ export function createPrismaAccessTokenPort(
           'failed to exchange refresh token',
         );
       }
-      // Microsoft may rotate the refresh token. Storing the new ciphertext is
-      // outside TASK-031's scope (TASK-020 owns encrypted persistence) — we
-      // only consume the access token here.
+      // TASK-036 — Microsoft may rotate the refresh token. Persist the new
+      // (encrypted) token so the next refresh does not fail with invalid_grant.
+      // When no new token is returned, the existing one is kept untouched.
+      await persistRotatedRefreshToken(mailbox.id, exchanged.refreshToken, {
+        prisma: client,
+      });
       return exchanged.accessToken;
     },
   };
@@ -184,6 +188,8 @@ export function buildDefaultDeltaPollingDeps(
     logger: overrides.logger,
     now: overrides.now,
     maxPagesPerMailbox: overrides.maxPagesPerMailbox ?? env.maxPagesPerMailbox,
+    bootstrapLookbackHours:
+      overrides.bootstrapLookbackHours ?? env.bootstrapLookbackHours,
   };
 }
 
