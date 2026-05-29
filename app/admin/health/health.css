@@ -1,0 +1,159 @@
+.health-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.health-subtitle {
+  margin: 0.25rem 0 0;
+  color: #64748b;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  max-width: 48rem;
+}
+
+.health-overview {
+  margin-bottom: 2rem;
+}
+
+.health-card__value {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.health-card--warning {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.health-card--critical {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
+/* Status badges --------------------------------------------------------- */
+
+.health-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.health-badge--ok {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.health-badge--warning {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.health-badge--critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.health-badge--unknown {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+/* Sections -------------------------------------------------------------- */
+
+.health-section {
+  margin-top: 2rem;
+}
+
+.health-section__title {
+  margin: 0 0 1rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+/* Operational checks ---------------------------------------------------- */
+
+.health-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.health-check {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  padding: 1rem 1.125rem;
+}
+
+.health-check__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.health-check__label {
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+
+.health-check__detail {
+  margin: 0.5rem 0 0;
+  color: #475569;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+/* Mailbox table --------------------------------------------------------- */
+
+.health-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  background: #ffffff;
+}
+
+.health-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+.health-table th,
+.health-table td {
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.health-table thead th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #475569;
+  text-transform: uppercase;
+  font-size: 0.6875rem;
+  letter-spacing: 0.04em;
+}
+
+.health-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.health-table__error {
+  max-width: 20rem;
+  white-space: normal;
+  color: #b91c1c;
+}
