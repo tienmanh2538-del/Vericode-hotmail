@@ -1,3 +1,4 @@
+import { ConnectMailboxButton } from '@/components/admin/ConnectMailboxButton';
 import { MailboxListTable } from '@/components/tables/MailboxListTable';
 import { createLogger } from '@/lib/logger';
 import {
@@ -40,15 +41,28 @@ export default async function MailboxesListPage() {
             mapping và Microsoft Graph subscription.
           </p>
         </div>
+        <ConnectMailboxButton variant="compact" showIntro={false} />
       </div>
 
-      {result.ok ? (
-        <MailboxListTable mailboxes={result.mailboxes} />
-      ) : (
+      {!result.ok ? (
         <div className="admin-banner admin-banner--error" role="alert">
           <strong>Không tải được danh sách mailbox.</strong>{' '}
           Vui lòng kiểm tra database/dev server rồi thử lại.
         </div>
+      ) : result.mailboxes.length === 0 ? (
+        <div className="mailboxes-empty">
+          <h3 className="mailboxes-empty__title">
+            Chưa có mailbox nào được kết nối
+          </h3>
+          <p className="mailboxes-empty__description">
+            Hãy kết nối mailbox Hotmail/Outlook đầu tiên để hệ thống bắt đầu đọc
+            email xác minh Facebook/Meta. Mailbox sau khi OAuth thành công sẽ
+            xuất hiện ở đây.
+          </p>
+          <ConnectMailboxButton />
+        </div>
+      ) : (
+        <MailboxListTable mailboxes={result.mailboxes} />
       )}
     </>
   );
