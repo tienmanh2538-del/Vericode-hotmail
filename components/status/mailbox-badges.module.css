@@ -1,0 +1,74 @@
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #e2e8f0;
+  color: #0f172a;
+  white-space: nowrap;
+}
+
+.mailboxActive {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.mailboxReconnect {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.mailboxSubExpired {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.mailboxWebhookFailed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.mailboxDisabled {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.mailboxError {
+  background: #fecaca;
+  color: #7f1d1d;
+}
+
+.subActive {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.subRenewing {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.subExpired {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.subFailed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.telegramActive {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.telegramDisabled {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.muted {
+  color: #64748b;
+}
