@@ -19,6 +19,9 @@ export interface EnvValues {
   TELEGRAM_ADMIN_ALERT_CHAT_ID?: string;
   ENCRYPTION_KEY?: string;
   AUTH_DEV_DEMO_USER?: string;
+  REDIS_URL?: string;
+  EMAIL_QUEUE_NAME?: string;
+  EMAIL_WORKER_CONCURRENCY?: string;
 }
 
 export interface EnvLoadResult {

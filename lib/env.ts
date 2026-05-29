@@ -72,6 +72,9 @@ export function loadEnv(
     TELEGRAM_ADMIN_ALERT_CHAT_ID: pickString(source.TELEGRAM_ADMIN_ALERT_CHAT_ID),
     ENCRYPTION_KEY: pickString(source.ENCRYPTION_KEY),
     AUTH_DEV_DEMO_USER: pickString(source.AUTH_DEV_DEMO_USER),
+    REDIS_URL: pickString(source.REDIS_URL),
+    EMAIL_QUEUE_NAME: pickString(source.EMAIL_QUEUE_NAME),
+    EMAIL_WORKER_CONCURRENCY: pickString(source.EMAIL_WORKER_CONCURRENCY),
   };
 
   return { values, warnings };
@@ -151,6 +154,28 @@ export function requireGraphSubscriptionEnv(
     notificationUrl: values.MICROSOFT_GRAPH_NOTIFICATION_URL as string,
     lifecycleNotificationUrl: values.MICROSOFT_GRAPH_LIFECYCLE_NOTIFICATION_URL,
   };
+}
+
+const DEFAULT_REDIS_URL = 'redis://127.0.0.1:6379';
+const DEFAULT_EMAIL_QUEUE_NAME = 'email-processing';
+const DEFAULT_EMAIL_WORKER_CONCURRENCY = 2;
+
+export function loadQueueEnv(values: EnvValues = loadEnv().values): {
+  redisUrl: string;
+  emailQueueName: string;
+  emailWorkerConcurrency: number;
+} {
+  const redisUrl = values.REDIS_URL ?? DEFAULT_REDIS_URL;
+  const emailQueueName = values.EMAIL_QUEUE_NAME ?? DEFAULT_EMAIL_QUEUE_NAME;
+  const rawConcurrency = values.EMAIL_WORKER_CONCURRENCY;
+  let emailWorkerConcurrency = DEFAULT_EMAIL_WORKER_CONCURRENCY;
+  if (rawConcurrency !== undefined) {
+    const parsed = Number.parseInt(rawConcurrency, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      emailWorkerConcurrency = parsed;
+    }
+  }
+  return { redisUrl, emailQueueName, emailWorkerConcurrency };
 }
 
 export type { AppEnv, EnvLoadResult, EnvValues, LogLevel, EnvKey };

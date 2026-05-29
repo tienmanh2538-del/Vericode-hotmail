@@ -3,8 +3,17 @@ import { createLogger } from '@/lib/logger';
 import {
   handleMicrosoftGraphNotifications,
   parseNotificationCollection,
+  type AcceptedMicrosoftMailNotification,
   type WebhookNotificationDeps,
 } from '@/services/microsoft/webhook-notification.service';
+import {
+  EMAIL_WEBHOOK_JOB_SOURCE,
+  type EmailWebhookJobData,
+} from '@/services/queue/email-job.types';
+import {
+  enqueueMicrosoftGraphMessageJob,
+  type EnqueueResult,
+} from '@/services/queue/email-queue';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,9 +47,57 @@ async function readJsonSafely(request: NextRequest): Promise<unknown | undefined
   }
 }
 
+type EnqueueFn = (data: EmailWebhookJobData) => Promise<EnqueueResult>;
+
+export interface WebhookRouteDeps extends WebhookNotificationDeps {
+  enqueue?: EnqueueFn;
+  now?: () => Date;
+}
+
+function toEmailWebhookJobData(
+  accepted: AcceptedMicrosoftMailNotification,
+  queuedAtIso: string,
+): EmailWebhookJobData {
+  return {
+    mailboxId: accepted.mailboxId,
+    graphMessageId: accepted.graphMessageId,
+    subscriptionId: accepted.subscriptionId,
+    resource: accepted.resource.length > 0 ? accepted.resource : undefined,
+    changeType: accepted.changeType,
+    clientStateValidated: true,
+    queuedAt: queuedAtIso,
+    source: EMAIL_WEBHOOK_JOB_SOURCE,
+  };
+}
+
+async function enqueueAcceptedNotifications(
+  accepted: AcceptedMicrosoftMailNotification[],
+  enqueue: EnqueueFn,
+  nowIso: string,
+): Promise<{ enqueued: number; failed: number }> {
+  let enqueued = 0;
+  let failed = 0;
+  for (const item of accepted) {
+    try {
+      await enqueue(toEmailWebhookJobData(item, nowIso));
+      enqueued += 1;
+    } catch {
+      failed += 1;
+      // Detailed error logged by enqueueMicrosoftGraphMessageJob. Do not log
+      // notification body here — it may contain identifiers we already log
+      // via the queue layer.
+      logger.error('Failed to enqueue Microsoft Graph notification', {
+        mailboxId: item.mailboxId,
+        graphMessageId: item.graphMessageId,
+      });
+    }
+  }
+  return { enqueued, failed };
+}
+
 async function handleWebhookRequest(
   request: NextRequest,
-  deps: WebhookNotificationDeps = {},
+  deps: WebhookRouteDeps = {},
 ): Promise<Response> {
   const validationToken = getValidationToken(request);
 
@@ -63,10 +120,19 @@ async function handleWebhookRequest(
 
   try {
     const result = await handleMicrosoftGraphNotifications(collection, deps);
+    const enqueueFn = deps.enqueue ?? enqueueMicrosoftGraphMessageJob;
+    const nowIso = (deps.now ? deps.now() : new Date()).toISOString();
+    const enqueueResult = await enqueueAcceptedNotifications(
+      result.accepted,
+      enqueueFn,
+      nowIso,
+    );
     logger.info('Microsoft webhook notification batch handled', {
       received: result.received,
       accepted: result.accepted.length,
       skipped: result.skipped.length,
+      enqueued: enqueueResult.enqueued,
+      enqueueFailed: enqueueResult.failed,
     });
     return NextResponse.json(
       {
@@ -74,6 +140,8 @@ async function handleWebhookRequest(
         received: result.received,
         accepted: result.accepted.length,
         skipped: result.skipped.length,
+        enqueued: enqueueResult.enqueued,
+        enqueueFailed: enqueueResult.failed,
       },
       { status: 202 },
     );

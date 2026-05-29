@@ -30,6 +30,24 @@ vi.mock('@/lib/prisma', () => ({
   },
 }));
 
+// Mock the queue module so tests never touch Redis. The TASK-026 wiring
+// pushes accepted notifications onto BullMQ; in unit tests we just record
+// the calls and return a fake result.
+const enqueueCalls = vi.hoisted(() => ({
+  list: [] as Array<Record<string, unknown>>,
+}));
+
+vi.mock('@/services/queue/email-queue', () => ({
+  enqueueMicrosoftGraphMessageJob: vi.fn(async (data: Record<string, unknown>) => {
+    enqueueCalls.list.push(data);
+    return {
+      jobId: `microsoft-webhook:${String(data.mailboxId)}:${String(data.graphMessageId)}`,
+      jobName: 'PROCESS_MICROSOFT_GRAPH_MESSAGE',
+      queueName: 'email-processing',
+    };
+  }),
+}));
+
 const { POST } = await import('@/app/api/webhooks/microsoft/mail/route');
 
 const ROUTE_BASE = 'http://localhost:3000/api/webhooks/microsoft/mail';
@@ -79,6 +97,7 @@ function buildNotification(
 
 beforeEach(() => {
   mockState.rows.length = 0;
+  enqueueCalls.list.length = 0;
 });
 
 describe('POST /api/webhooks/microsoft/mail — validationToken still wins', () => {
@@ -135,8 +154,43 @@ describe('POST /api/webhooks/microsoft/mail — notification routing', () => {
       received: number;
       accepted: number;
       skipped: number;
+      enqueued: number;
+      enqueueFailed: number;
     };
-    expect(payload).toEqual({ ok: true, received: 1, accepted: 1, skipped: 0 });
+    expect(payload).toEqual({
+      ok: true,
+      received: 1,
+      accepted: 1,
+      skipped: 0,
+      enqueued: 1,
+      enqueueFailed: 0,
+    });
+    expect(enqueueCalls.list).toHaveLength(1);
+    expect(enqueueCalls.list[0]).toMatchObject({
+      mailboxId: MAILBOX_ID,
+      graphMessageId: MESSAGE_ID,
+      clientStateValidated: true,
+      source: 'microsoft-webhook',
+    });
+  });
+
+  it('does not enqueue notifications that fail clientState validation', async () => {
+    seedActiveSubscription();
+    const request = makePostNotificationRequest({
+      value: [buildNotification({ clientState: WRONG_CLIENT_STATE })],
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(202);
+    const payload = (await response.json()) as {
+      accepted: number;
+      skipped: number;
+      enqueued: number;
+    };
+    expect(payload.accepted).toBe(0);
+    expect(payload.skipped).toBe(1);
+    expect(payload.enqueued).toBe(0);
+    expect(enqueueCalls.list).toHaveLength(0);
   });
 
   it('skips notification with wrong clientState (still 202)', async () => {
