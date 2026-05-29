@@ -106,7 +106,8 @@
 
 \- TASK-029: Tạo mailbox detail page
 
-\- TASK-030: Tạo connect mailbox UI
+\- TASK-030: Tạo connect mailbox UI ( (Đã làm sớm một phần ở TASK-026 để test luồng: Nút Connect & Banner lỗi
+     tại Admin Dashboard). Khi tới Sprint 7 chỉ cần review và tinh chỉnh nếu cần.)
 
 
 
