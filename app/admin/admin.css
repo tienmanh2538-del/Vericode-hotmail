@@ -161,6 +161,62 @@
   line-height: 1.6;
 }
 
+.admin-banner {
+  margin: 0 0 1.25rem;
+  padding: 0.875rem 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+.admin-banner--success {
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+  color: #065f46;
+}
+
+.admin-banner--error {
+  background: #fef2f2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
+.admin-connect {
+  margin: 0 0 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.admin-connect__button {
+  background: #1d4ed8;
+  color: #ffffff;
+  border: none;
+  border-radius: 0.375rem;
+  padding: 0.625rem 1.125rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease, opacity 120ms ease;
+}
+
+.admin-connect__button:hover:not(:disabled) {
+  background: #1e40af;
+}
+
+.admin-connect__button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.admin-connect__error {
+  margin: 0;
+  color: #991b1b;
+  font-size: 0.875rem;
+}
+
 @media (max-width: 768px) {
   .admin-shell {
     grid-template-columns: 1fr;
