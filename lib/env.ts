@@ -2,6 +2,7 @@ import {
   APP_ENV_VALUES,
   DATABASE_REQUIRED,
   ENCRYPTION_REQUIRED,
+  GRAPH_SUBSCRIPTION_REQUIRED,
   LOG_LEVEL_VALUES,
   MICROSOFT_REQUIRED,
   TELEGRAM_REQUIRED,
@@ -61,6 +62,12 @@ export function loadEnv(
     MICROSOFT_CLIENT_SECRET: pickString(source.MICROSOFT_CLIENT_SECRET),
     MICROSOFT_TENANT_ID: pickString(source.MICROSOFT_TENANT_ID),
     MICROSOFT_REDIRECT_URI: pickString(source.MICROSOFT_REDIRECT_URI),
+    MICROSOFT_GRAPH_NOTIFICATION_URL: pickString(
+      source.MICROSOFT_GRAPH_NOTIFICATION_URL,
+    ),
+    MICROSOFT_GRAPH_LIFECYCLE_NOTIFICATION_URL: pickString(
+      source.MICROSOFT_GRAPH_LIFECYCLE_NOTIFICATION_URL,
+    ),
     TELEGRAM_BOT_TOKEN: pickString(source.TELEGRAM_BOT_TOKEN),
     TELEGRAM_ADMIN_ALERT_CHAT_ID: pickString(source.TELEGRAM_ADMIN_ALERT_CHAT_ID),
     ENCRYPTION_KEY: pickString(source.ENCRYPTION_KEY),
@@ -131,6 +138,19 @@ export function requireEncryptionEnv(values: EnvValues = loadEnv().values): {
 } {
   assertRequired('encryption', values, ENCRYPTION_REQUIRED);
   return { key: values.ENCRYPTION_KEY as string };
+}
+
+export function requireGraphSubscriptionEnv(
+  values: EnvValues = loadEnv().values,
+): {
+  notificationUrl: string;
+  lifecycleNotificationUrl?: string;
+} {
+  assertRequired('graph-subscription', values, GRAPH_SUBSCRIPTION_REQUIRED);
+  return {
+    notificationUrl: values.MICROSOFT_GRAPH_NOTIFICATION_URL as string,
+    lifecycleNotificationUrl: values.MICROSOFT_GRAPH_LIFECYCLE_NOTIFICATION_URL,
+  };
 }
 
 export type { AppEnv, EnvLoadResult, EnvValues, LogLevel, EnvKey };
