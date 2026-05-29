@@ -2,6 +2,12 @@ import { Worker, type Job } from 'bullmq';
 
 import { loadQueueEnv } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
+import {
+  processGraphMessageJob,
+  type GraphMessagePipelineDeps,
+  type GraphMessagePipelineResult,
+  type GraphMessageProcessingJob,
+} from '@/services/email/graph-message-pipeline.service';
 
 import {
   EMAIL_QUEUE_JOB_NAMES,
@@ -12,18 +18,56 @@ import { getRedisConnectionOptions } from '../redis-connection';
 
 const logger = createLogger();
 
+export type EmailWorkerPipeline = (
+  job: GraphMessageProcessingJob,
+) => Promise<GraphMessagePipelineResult>;
+
 /**
- * TASK-026 worker foundation. This worker accepts
- * `PROCESS_MICROSOFT_GRAPH_MESSAGE` jobs and logs safe metadata only.
+ * Translate a BullMQ job payload into the pipeline-facing
+ * `GraphMessageProcessingJob` shape. The worker never trusts the body fields
+ * for downstream parsing — only the mailbox / message identifiers cross over.
+ */
+function toPipelineJob(
+  data: EmailWebhookJobData,
+): GraphMessageProcessingJob {
+  return {
+    mailboxId: data.mailboxId,
+    graphMessageId: data.graphMessageId,
+    source: 'webhook',
+    subscriptionId: data.subscriptionId ?? null,
+    receivedNotificationAt: data.queuedAt ?? null,
+  };
+}
+
+/**
+ * Error wrapper that carries the safe pipeline envelope back to BullMQ's
+ * failure handler. It deliberately exposes no token/code material — the
+ * envelope already lacks them.
+ */
+export class EmailWorkerProcessingError extends Error {
+  readonly result: GraphMessagePipelineResult;
+
+  constructor(result: GraphMessagePipelineResult) {
+    super(`Email worker pipeline failed: ${result.status}`);
+    this.name = 'EmailWorkerProcessingError';
+    this.result = result;
+  }
+}
+
+/**
+ * TASK-027 worker. Receives validated `PROCESS_MICROSOFT_GRAPH_MESSAGE` jobs
+ * and forwards them to the Graph message pipeline (load mailbox → fetch Graph
+ * → detector → extractor → dedupe → Telegram).
  *
- * TASK-027 will implement the real email processing pipeline:
- *   Graph message → Facebook detector → code extractor → dedupe → Telegram.
- *
- * Until then, the processor is a no-op placeholder.
+ * The processor itself never throws on a domain skip — it returns a status so
+ * BullMQ does not retry deterministic skips like NO_TELEGRAM_MAPPING. It does
+ * throw for transient failures (FAILED_GRAPH_FETCH, FAILED_RECONNECT_REQUIRED,
+ * FAILED_TELEGRAM_SEND) so BullMQ retries based on `attempts/backoff`.
  */
 export async function processEmailWebhookJob(
   job: Job<EmailWebhookJobData>,
-): Promise<{ acknowledged: true }> {
+  pipeline: EmailWorkerPipeline = processGraphMessageJob as EmailWorkerPipeline,
+): Promise<GraphMessagePipelineResult | { acknowledged: true }> {
   if (job.name !== EMAIL_QUEUE_JOB_NAMES.PROCESS_MICROSOFT_GRAPH_MESSAGE) {
     logger.warn('Email worker received unknown job name', {
       jobName: job.name,
@@ -31,19 +75,38 @@ export async function processEmailWebhookJob(
     return { acknowledged: true };
   }
 
-  // Only log opaque identifiers — never the full payload.
-  logger.info(
-    'Email worker received Microsoft Graph notification (TASK-027 will implement real pipeline)',
-    {
-      jobName: job.name,
-      jobId: typeof job.id === 'string' ? job.id : undefined,
-      mailboxId: job.data.mailboxId,
-      graphMessageId: job.data.graphMessageId,
-      attemptsMade: job.attemptsMade,
-    },
-  );
+  // Only opaque identifiers are logged — never the payload contents.
+  logger.info('Email worker received Microsoft Graph notification', {
+    jobName: job.name,
+    jobId: typeof job.id === 'string' ? job.id : undefined,
+    mailboxId: job.data.mailboxId,
+    graphMessageId: job.data.graphMessageId,
+    attemptsMade: job.attemptsMade,
+  });
 
-  return { acknowledged: true };
+  const result = await pipeline(toPipelineJob(job.data));
+
+  logger.info('Email worker pipeline result', {
+    jobName: job.name,
+    jobId: typeof job.id === 'string' ? job.id : undefined,
+    mailboxId: result.mailboxId,
+    graphMessageId: result.graphMessageId,
+    status: result.status,
+    sentToTelegram: result.sentToTelegram ?? false,
+  });
+
+  // Transient failures should trigger BullMQ retry. Skips and CODE_SENT are
+  // terminal — returning the envelope lets the queue treat them as complete.
+  if (
+    result.status === 'FAILED_GRAPH_FETCH' ||
+    result.status === 'FAILED_RECONNECT_REQUIRED' ||
+    result.status === 'FAILED_TELEGRAM_SEND' ||
+    result.status === 'FAILED_UNEXPECTED'
+  ) {
+    throw new EmailWorkerProcessingError(result);
+  }
+
+  return result;
 }
 
 export interface CreateEmailWorkerOptions {
@@ -51,6 +114,11 @@ export interface CreateEmailWorkerOptions {
   queueName?: string;
   /** Override concurrency (defaults to EMAIL_WORKER_CONCURRENCY env). */
   concurrency?: number;
+  /**
+   * Custom pipeline implementation. Tests inject a fake; the worker script
+   * passes a Prisma/Graph/Telegram-backed default constructed elsewhere.
+   */
+  pipeline?: EmailWorkerPipeline;
 }
 
 /**
@@ -64,10 +132,11 @@ export function createEmailWorker(
   const { emailQueueName, emailWorkerConcurrency } = loadQueueEnv();
   const queueName = options.queueName ?? emailQueueName ?? EMAIL_QUEUE_NAME;
   const concurrency = options.concurrency ?? emailWorkerConcurrency;
+  const pipeline = options.pipeline;
 
   const worker = new Worker<EmailWebhookJobData>(
     queueName,
-    processEmailWebhookJob,
+    (job) => processEmailWebhookJob(job, pipeline),
     {
       connection: getRedisConnectionOptions(),
       concurrency,
@@ -91,3 +160,5 @@ export function createEmailWorker(
 
   return worker;
 }
+
+export type { GraphMessagePipelineDeps, GraphMessagePipelineResult };
