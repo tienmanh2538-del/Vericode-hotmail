@@ -100,6 +100,22 @@ Quy tắc bắt buộc:
 - Production / staging **phải** dùng HTTPS.
 - Mỗi môi trường (local, staging, production) có một redirect URI riêng — có thể thêm nhiều entry vào cùng App Registration, hoặc tách riêng theo môi trường.
 
+### 3.4. Staging redirect URI & webhook URL
+
+Cho môi trường **staging** (xem `docs/STAGING_DEPLOYMENT.md`):
+
+```text
+Redirect URI:  https://YOUR_STAGING_DOMAIN/api/microsoft/oauth/callback
+Webhook URL:   https://YOUR_STAGING_DOMAIN/api/webhooks/microsoft/mail
+```
+
+Quy tắc staging:
+
+- Tạo **App Registration riêng cho staging** — không tái dùng client secret của local dev.
+- Staging **bắt buộc HTTPS** (không dùng `http://localhost`).
+- Redirect URI staging phải khớp tuyệt đối với `MICROSOFT_REDIRECT_URI` trong env staging.
+- Webhook URL staging phải là public HTTPS và khớp `MICROSOFT_GRAPH_NOTIFICATION_URL`.
+
 ---
 
 ## 4. Client ID, Tenant ID, Client Secret
