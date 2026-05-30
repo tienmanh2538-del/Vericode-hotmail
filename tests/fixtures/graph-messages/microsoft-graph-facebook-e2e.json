@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "purpose": "TASK-038 E2E fixture: a valid Facebook/Meta verification email as returned by the Microsoft Graph message endpoint (GraphMailMessage shape).",
+    "warning": "Synthetic data only. Not a real mailbox, sender, Telegram chat id, token, or verification code. receivedDateTime is overridden at runtime so the detector never treats the fixture as stale."
+  },
+  "id": "AAMkAG-graph-msg-038-facebook-0001",
+  "internetMessageId": "<imid-038-facebook-0001@example.test>",
+  "from": {
+    "emailAddress": {
+      "name": "Facebook",
+      "address": "security@facebookmail.com"
+    }
+  },
+  "sender": {
+    "emailAddress": {
+      "name": "Facebook",
+      "address": "security@facebookmail.com"
+    }
+  },
+  "subject": "Your Facebook security code",
+  "receivedDateTime": "2026-05-30T10:00:00.000Z",
+  "bodyPreview": "Your Facebook security code is 739216.",
+  "body": {
+    "contentType": "text",
+    "content": "Hi,\n\nYour Facebook security code is 739216. Use it to log in to your account.\n\nThanks,\nThe Facebook team"
+  },
+  "toRecipients": [
+    {
+      "emailAddress": {
+        "name": "Relay E2E",
+        "address": "relay.e2e@example.test"
+      }
+    }
+  ]
+}

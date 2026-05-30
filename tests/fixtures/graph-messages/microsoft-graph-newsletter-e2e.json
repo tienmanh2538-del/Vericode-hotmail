@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "purpose": "TASK-038 E2E fixture: a non Facebook/Meta marketing email as returned by the Microsoft Graph message endpoint (GraphMailMessage shape). The detector must reject it and its inline number must never be treated as a verification code.",
+    "warning": "Synthetic data only. Not a real mailbox, sender, Telegram chat id, token, or verification code."
+  },
+  "id": "AAMkAG-graph-msg-038-newsletter-0001",
+  "internetMessageId": "<imid-038-newsletter-0001@example.test>",
+  "from": {
+    "emailAddress": {
+      "name": "Acme News",
+      "address": "hello@news.example.test"
+    }
+  },
+  "sender": {
+    "emailAddress": {
+      "name": "Acme News",
+      "address": "hello@news.example.test"
+    }
+  },
+  "subject": "Weekly newsletter from Acme",
+  "receivedDateTime": "2026-05-30T10:00:00.000Z",
+  "bodyPreview": "Check our latest products. Order 884512 is on its way.",
+  "body": {
+    "contentType": "text",
+    "content": "Check our latest products. Your order 884512 is on its way. Unsubscribe anytime."
+  },
+  "toRecipients": [
+    {
+      "emailAddress": {
+        "name": "Relay E2E",
+        "address": "relay.e2e@example.test"
+      }
+    }
+  ]
+}
