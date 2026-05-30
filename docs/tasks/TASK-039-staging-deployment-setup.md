@@ -116,16 +116,22 @@ Các biến tối thiểu:
 APP_ENV=staging
 APP_URL=https://YOUR_STAGING_DOMAIN
 DATABASE_URL=postgresql://...
-ENCRYPTION_KEY=...
+# Sensitive — để TRỐNG trong tài liệu/example; giá trị thật chỉ cấu hình trong
+# secret manager của deploy platform, không commit vào repo.
+ENCRYPTION_KEY=
 MICROSOFT_CLIENT_ID=...
-MICROSOFT_CLIENT_SECRET=...
+MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=common
 MICROSOFT_REDIRECT_URI=https://YOUR_STAGING_DOMAIN/api/microsoft/oauth/callback
 MICROSOFT_WEBHOOK_URL=https://YOUR_STAGING_DOMAIN/webhooks/microsoft/mail
-TELEGRAM_BOT_TOKEN=...
+TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_ALERT_CHAT_ID=...
 LOG_LEVEL=info
 ```
+
+Các biến nhạy cảm (`ENCRYPTION_KEY`, `MICROSOFT_CLIENT_SECRET`, `TELEGRAM_BOT_TOKEN`)
+để **trống** trong tài liệu — giá trị thật chỉ nằm trong secret manager của deploy
+platform, **không** commit vào repo.
 
 Nếu project thực tế có thêm biến khác, Claude phải đọc `.env.example` và đồng bộ danh sách placeholder tương ứng.
 
@@ -245,19 +251,26 @@ APP_URL=https://YOUR_STAGING_DOMAIN
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
 REDIS_URL=redis://USER:PASSWORD@HOST:PORT
 
-ENCRYPTION_KEY=replace_with_staging_encryption_key
+# Sensitive — để TRỐNG; giá trị thật chỉ cấu hình trong secret manager.
+ENCRYPTION_KEY=
 
 MICROSOFT_CLIENT_ID=replace_with_staging_client_id
-MICROSOFT_CLIENT_SECRET=replace_with_staging_client_secret
+# Sensitive — để TRỐNG; giá trị thật chỉ cấu hình trong secret manager.
+MICROSOFT_CLIENT_SECRET=
 MICROSOFT_TENANT_ID=common
 MICROSOFT_REDIRECT_URI=https://YOUR_STAGING_DOMAIN/api/microsoft/oauth/callback
 MICROSOFT_WEBHOOK_URL=https://YOUR_STAGING_DOMAIN/webhooks/microsoft/mail
 
-TELEGRAM_BOT_TOKEN=replace_with_staging_bot_token
+# Sensitive — để TRỐNG; giá trị thật chỉ cấu hình trong secret manager.
+TELEGRAM_BOT_TOKEN=
 TELEGRAM_ADMIN_ALERT_CHAT_ID=replace_with_staging_admin_alert_chat_id
 
 LOG_LEVEL=info
 ```
+
+Biến nhạy cảm (`ENCRYPTION_KEY`, `MICROSOFT_CLIENT_SECRET`, `TELEGRAM_BOT_TOKEN`) để
+**trống**: giá trị thật phải cấu hình trong secret manager của deploy platform và
+**không** commit secret thật vào repo.
 
 Nếu project thực tế không dùng một biến nào đó, Claude có thể ghi chú trong docs nhưng không được xóa bừa nếu biến đó có thể cần cho staging.
 
