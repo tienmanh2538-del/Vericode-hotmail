@@ -2,11 +2,10 @@ import { Worker, type Job } from 'bullmq';
 
 import { loadQueueEnv } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
-import {
-  processGraphMessageJob,
-  type GraphMessagePipelineDeps,
-  type GraphMessagePipelineResult,
-  type GraphMessageProcessingJob,
+import type {
+  GraphMessagePipelineDeps,
+  GraphMessagePipelineResult,
+  GraphMessageProcessingJob,
 } from '@/services/email/graph-message-pipeline.service';
 
 import {
@@ -22,6 +21,22 @@ const logger = createLogger();
 export type EmailWorkerPipeline = (
   job: GraphMessageProcessingJob,
 ) => Promise<GraphMessagePipelineResult>;
+
+/**
+ * Lazily-built production pipeline. The real dependency wiring lives in
+ * `email-worker-runner` (Prisma + Graph + Telegram + DB audit). It is imported
+ * dynamically so this module stays free of DB/Telegram imports at load time and
+ * so unit tests (which always inject a fake pipeline) never construct it.
+ */
+let cachedDefaultPipeline: EmailWorkerPipeline | null = null;
+
+async function resolveDefaultPipeline(): Promise<EmailWorkerPipeline> {
+  if (cachedDefaultPipeline === null) {
+    const { buildDefaultEmailPipeline } = await import('./email-worker-runner');
+    cachedDefaultPipeline = buildDefaultEmailPipeline();
+  }
+  return cachedDefaultPipeline;
+}
 
 /**
  * Translate a BullMQ job payload into the pipeline-facing
@@ -79,7 +94,7 @@ export class EmailWorkerProcessingError extends Error {
  */
 export async function processEmailWebhookJob(
   job: Job<EmailJobData>,
-  pipeline: EmailWorkerPipeline = processGraphMessageJob as EmailWorkerPipeline,
+  pipeline?: EmailWorkerPipeline,
 ): Promise<GraphMessagePipelineResult | { acknowledged: true }> {
   if (job.name !== EMAIL_QUEUE_JOB_NAMES.PROCESS_MICROSOFT_GRAPH_MESSAGE) {
     logger.warn('Email worker received unknown job name', {
@@ -87,6 +102,9 @@ export async function processEmailWebhookJob(
     });
     return { acknowledged: true };
   }
+
+  // No injected pipeline (production worker) ⇒ build the real one lazily.
+  const runPipeline = pipeline ?? (await resolveDefaultPipeline());
 
   // Only opaque identifiers are logged — never the payload contents.
   logger.info('Email worker received Microsoft Graph notification', {
@@ -97,7 +115,7 @@ export async function processEmailWebhookJob(
     attemptsMade: job.attemptsMade,
   });
 
-  const result = await pipeline(toPipelineJob(job.data));
+  const result = await runPipeline(toPipelineJob(job.data));
 
   logger.info('Email worker pipeline result', {
     jobName: job.name,

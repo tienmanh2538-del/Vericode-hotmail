@@ -219,7 +219,25 @@ export default async function HealthDashboardPage() {
               label="Last code sent"
               value={formatDateTime(result.data.overview.lastCodeSentAt)}
             />
+            <OverviewCard
+              label="Last processed email"
+              value={formatDateTime(result.data.overview.lastProcessedEmailAt)}
+            />
+            <OverviewCard
+              label="Last polling run"
+              value={formatDateTime(result.data.overview.lastPollingRunAt)}
+            />
+            <OverviewCard
+              label="Last renewal run"
+              value={formatDateTime(result.data.overview.lastRenewalRunAt)}
+            />
           </section>
+
+          {result.data.overview.lastErrorShort ? (
+            <div className="admin-banner admin-banner--warning" role="status">
+              <strong>Last error:</strong> {result.data.overview.lastErrorShort}
+            </div>
+          ) : null}
 
           <OperationalChecksSection checks={result.data.operationalChecks} />
 

@@ -61,18 +61,6 @@ enum ProcessedMessageStatus {
   DUPLICATE
 }
 
-enum AuditAction {
-  MAILBOX_CONNECTED
-  MAILBOX_DISCONNECTED
-  TELEGRAM_MAPPING_CREATED
-  TELEGRAM_MAPPING_UPDATED
-  CODE_DETECTED
-  CODE_SENT
-  CODE_SKIPPED_LOW_CONFIDENCE
-  SUBSCRIPTION_RENEWED
-  TOKEN_REFRESH_FAILED
-}
-
 // -----------------------------------------------------------------------------
 // Models
 // -----------------------------------------------------------------------------
@@ -194,17 +182,49 @@ model ProcessedMessage {
 }
 
 model AuditLog {
-  id           String      @id @default(cuid())
+  id           String   @id @default(cuid())
   actorUserId  String?
-  actorUser    User?       @relation(fields: [actorUserId], references: [id])
-  action       AuditAction
+  actorUser    User?    @relation(fields: [actorUserId], references: [id])
+  actorEmail   String?
+  // TASK-040: stored as String so the (wider) application-level action set
+  // (customer/telegram/admin-login/system events) is not constrained by a
+  // narrow DB enum. Values are still validated in the service layer.
+  action       String
   entityType   String
   entityId     String?
+  severity     String   @default("info")
+  summary      String?
+  // Sensitive keys (token/secret/password/code/...) are scrubbed by the
+  // service before this column is written.
   metadataJson Json?
   ipAddress    String?
-  createdAt    DateTime    @default(now())
+  createdAt    DateTime @default(now())
 
   @@index([action])
   @@index([entityType, entityId])
   @@index([createdAt])
+}
+
+// TASK-040: Code event log persisted to the DB so the Web UI (Next process) and
+// the email worker (separate process) read/write the SAME store. The full
+// verification code, email body, and any token/secret are NEVER stored here —
+// only a masked/hashed code reference and safe metadata.
+model CodeEvent {
+  id                String    @id @default(cuid())
+  createdAt         DateTime  @default(now())
+  receivedAt        DateTime?
+  mailboxEmail      String
+  customerName      String?
+  platform          String    @default("Facebook/Meta")
+  status            String
+  // Masked/hashed code only (e.g. "82****" or "sha256:<hex>"). Never raw.
+  maskedCode        String?
+  confidence        Int?
+  telegramGroupName String?
+  source            String    @default("mock")
+  message           String?
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([mailboxEmail])
 }

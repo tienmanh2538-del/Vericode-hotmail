@@ -1,8 +1,6 @@
 import { CodeEventLogTable } from "@/components/tables/CodeEventLogTable";
-import {
-  listCodeEvents,
-  summarizeCodeEvents,
-} from "@/services/logs/code-event-log.service";
+import { summarizeCodeEvents } from "@/services/logs/code-event-log.service";
+import { listCodeEventsFromDb } from "@/services/logs/prisma-code-event-store";
 import "../../customers/customers.css";
 import "./code-events.css";
 
@@ -13,8 +11,8 @@ interface SummaryCard {
   value: number;
 }
 
-export default function CodeEventLogPage() {
-  const events = listCodeEvents();
+export default async function CodeEventLogPage() {
+  const events = await listCodeEventsFromDb();
   const summary = summarizeCodeEvents(events);
 
   const cards: SummaryCard[] = [

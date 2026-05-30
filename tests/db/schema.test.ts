@@ -25,6 +25,8 @@ describe('prisma/schema.prisma', () => {
       'GraphSubscription',
       'ProcessedMessage',
       'AuditLog',
+      // TASK-040: code event log persisted to the DB (shared UI ↔ worker).
+      'CodeEvent',
     ];
     for (const m of REQUIRED_MODELS) {
       it(`defines model ${m}`, () => {
@@ -34,6 +36,9 @@ describe('prisma/schema.prisma', () => {
   });
 
   describe('enums', () => {
+    // TASK-040: `AuditAction` was intentionally removed — AuditLog.action is now
+    // a String column so the wider application-level action set (customer /
+    // telegram / admin-login / system events) is not constrained by the DB enum.
     const REQUIRED_ENUMS = [
       'UserRole',
       'CustomerStatus',
@@ -42,7 +47,6 @@ describe('prisma/schema.prisma', () => {
       'TelegramMappingStatus',
       'GraphSubscriptionStatus',
       'ProcessedMessageStatus',
-      'AuditAction',
     ];
     for (const e of REQUIRED_ENUMS) {
       it(`defines enum ${e}`, () => {
@@ -72,21 +76,18 @@ describe('prisma/schema.prisma', () => {
     }
   });
 
-  it('AuditAction has all required actions', () => {
-    const block = schema.match(/enum AuditAction\s*\{([\s\S]*?)\}/)?.[1] ?? '';
-    for (const v of [
-      'MAILBOX_CONNECTED',
-      'MAILBOX_DISCONNECTED',
-      'TELEGRAM_MAPPING_CREATED',
-      'TELEGRAM_MAPPING_UPDATED',
-      'CODE_DETECTED',
-      'CODE_SENT',
-      'CODE_SKIPPED_LOW_CONFIDENCE',
-      'SUBSCRIPTION_RENEWED',
-      'TOKEN_REFRESH_FAILED',
-    ]) {
-      expect(block).toContain(v);
-    }
+  it('AuditLog.action is a String column (no DB enum constraint)', () => {
+    const block = schema.match(/model AuditLog\s*\{([\s\S]*?)^\}/m)?.[1] ?? '';
+    expect(block).toMatch(/action\s+String/);
+    // The obsolete enum must not be referenced anywhere.
+    expect(schema).not.toContain('enum AuditAction');
+  });
+
+  it('CodeEvent stores only a masked code, never a raw verification code', () => {
+    const block = schema.match(/model CodeEvent\s*\{([\s\S]*?)^\}/m)?.[1] ?? '';
+    expect(block).toContain('maskedCode');
+    expect(block).not.toMatch(/\bverificationCode\b/);
+    expect(block).not.toMatch(/^\s*code\s+String/m);
   });
 
   describe('secret-safety invariants', () => {

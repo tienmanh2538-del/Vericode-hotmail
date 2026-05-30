@@ -17,6 +17,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { prisma } from '@/lib/prisma';
+import { loadEnv, type AppEnv } from '@/lib/env';
 import { redactSensitiveText } from '@/lib/security/redact';
 import type {
   GraphSubscriptionStatusValue,
@@ -331,6 +332,35 @@ export function classifyTelegramReliability(
   };
 }
 
+/**
+ * Classify the BullMQ queue / Redis configuration. Presence-only: we never open
+ * a socket here (a health page must not block) and never print the URL (it may
+ * contain a password).
+ */
+export function classifyQueueRedis(
+  redisConfigured: boolean,
+  appEnv: AppEnv,
+): { status: OperationalCheckStatus; detail: string } {
+  if (redisConfigured) {
+    return {
+      status: 'PASS',
+      detail:
+        'REDIS_URL is configured for the BullMQ email queue (connectivity is not actively probed here).',
+    };
+  }
+  if (appEnv === 'staging' || appEnv === 'production') {
+    return {
+      status: 'WARNING',
+      detail:
+        'REDIS_URL is not set — the email queue is falling back to a localhost default that will not work on staging/production.',
+    };
+  }
+  return {
+    status: 'UNKNOWN',
+    detail: 'REDIS_URL is not set; using the localhost default for local development.',
+  };
+}
+
 export function classifyWebhookHealth(
   mailboxStatuses: readonly MailboxStatusValue[],
 ): { status: OperationalCheckStatus; detail: string } {
@@ -433,12 +463,20 @@ const MAILBOX_HEALTH_SELECT = {
   },
 } as const;
 
+interface OverviewRuntimeSignals {
+  lastProcessedEmailAt: Date | null;
+  lastPollingRunAt: Date | null;
+  lastRenewalRunAt: Date | null;
+  lastErrorShort: string | null;
+}
+
 function buildOverview(
   rows: readonly MailboxHealthRow[],
   subscriptions: readonly SubscriptionInfo[],
   recentTelegramFailures: number,
   now: Date,
   overall: HealthLevel,
+  runtime: OverviewRuntimeSignals,
 ): HealthOverview {
   const lastCodeSentAt = rows.reduce<Date | null>((latest, row) => {
     if (!row.lastCodeSentAt) return latest;
@@ -479,6 +517,10 @@ function buildOverview(
     ).length,
     recentTelegramFailures,
     lastCodeSentAt,
+    lastProcessedEmailAt: runtime.lastProcessedEmailAt,
+    lastPollingRunAt: runtime.lastPollingRunAt,
+    lastRenewalRunAt: runtime.lastRenewalRunAt,
+    lastErrorShort: runtime.lastErrorShort,
     overall,
   };
 }
@@ -491,7 +533,13 @@ export async function loadHealthDashboard(
   now: Date = new Date(),
 ): Promise<HealthLoadResult> {
   try {
-    const [mailboxRows, sentGroups, failedGroups] = await Promise.all([
+    const [
+      mailboxRows,
+      sentGroups,
+      failedGroups,
+      processedAgg,
+      renewalAgg,
+    ] = await Promise.all([
       prisma.mailbox.findMany({
         orderBy: { createdAt: 'desc' },
         select: MAILBOX_HEALTH_SELECT,
@@ -509,6 +557,10 @@ export async function loadHealthDashboard(
         },
         _count: { _all: true },
       }),
+      // Most recent email the pipeline processed (any status).
+      prisma.processedMessage.aggregate({ _max: { createdAt: true } }),
+      // Most recent subscription renewal across all subscriptions.
+      prisma.graphSubscription.aggregate({ _max: { lastRenewedAt: true } }),
     ]);
 
     const lastSentByMailbox = new Map<string, Date | null>();
@@ -587,6 +639,31 @@ export async function loadHealthDashboard(
     );
     const everSent = lastSentByMailbox.size > 0;
 
+    // Runtime "last run" signals (read-only aggregates).
+    const lastProcessedEmailAt = processedAgg._max.createdAt ?? null;
+    const lastRenewalRunAt = renewalAgg._max.lastRenewedAt ?? null;
+    const lastPollingRunAt = mailboxRows.reduce<Date | null>((latest, row) => {
+      const polled = row.deltaLastPolledAt;
+      if (!polled) return latest;
+      return !latest || polled.getTime() > latest.getTime() ? polled : latest;
+    }, null);
+    const latestErrorRow = mailboxRows.reduce<
+      { at: Date; message: string | null } | null
+    >((latest, row) => {
+      if (!row.deltaLastErrorAt) return latest;
+      if (!latest || row.deltaLastErrorAt.getTime() > latest.at.getTime()) {
+        return { at: row.deltaLastErrorAt, message: row.deltaLastErrorMessage };
+      }
+      return latest;
+    }, null);
+    const lastErrorShort = latestErrorRow
+      ? sanitizeErrorMessage(latestErrorRow.message)
+      : null;
+
+    const { values: envValues } = loadEnv();
+    const redisConfigured =
+      typeof envValues.REDIS_URL === 'string' && envValues.REDIS_URL.length > 0;
+
     const emailWorker = classifyEmailWorkerWiring(
       gatherEmailWorkerWiringEvidence(),
     );
@@ -595,6 +672,7 @@ export async function loadHealthDashboard(
       mailboxes.map((m) => ({ provider: m.provider, lastPolledAt: m.lastPolledAt })),
       now,
     );
+    const queueCheck = classifyQueueRedis(redisConfigured, envValues.APP_ENV);
     const telegramCheck = classifyTelegramReliability(totalRecentFailures, everSent);
     const webhookCheck = classifyWebhookHealth(
       mailboxes.map((m) => m.mailboxStatus),
@@ -604,6 +682,7 @@ export async function loadHealthDashboard(
       { id: 'EMAIL_WORKER_PIPELINE', label: 'Email worker pipeline', ...emailWorker },
       { id: 'DELTA_POLLING', label: 'Delta polling', ...pollingCheck },
       { id: 'SUBSCRIPTION_RENEWAL', label: 'Subscription renewal', ...subscriptionCheck },
+      { id: 'QUEUE_REDIS', label: 'Queue / Redis', ...queueCheck },
       { id: 'TELEGRAM_RELIABILITY', label: 'Telegram send reliability', ...telegramCheck },
       { id: 'WEBHOOK_HEALTH', label: 'Webhook health', ...webhookCheck },
     ];
@@ -619,6 +698,12 @@ export async function loadHealthDashboard(
       totalRecentFailures,
       now,
       overall,
+      {
+        lastProcessedEmailAt,
+        lastPollingRunAt,
+        lastRenewalRunAt,
+        lastErrorShort,
+      },
     );
 
     const data: HealthDashboardData = {

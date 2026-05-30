@@ -315,10 +315,16 @@ export function getDefaultAuditLogStore(): AuditLogStore {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function createAuditLog(
+/**
+ * A validated + sanitized audit entry WITHOUT a generated id. Shared between
+ * the in-memory store (which assigns a counter id) and the DB store (which lets
+ * Prisma generate the id). Metadata is already scrubbed of sensitive keys here.
+ */
+export type NormalizedAuditLog = Omit<AuditLogListItem, 'id'>;
+
+export function normalizeAuditLogInput(
   input: CreateAuditLogInput,
-  store: AuditLogStore = defaultStore,
-): AuditLogListItem {
+): NormalizedAuditLog {
   if (!isAuditLogAction(input?.action)) {
     throw new Error('audit-log: action is required and must be a known AuditLogAction');
   }
@@ -331,8 +337,7 @@ export function createAuditLog(
   const createdAt = toIsoString(input.createdAt) ?? new Date().toISOString();
   const sanitizedMetadata = sanitizeAuditMetadata(input.metadata ?? null);
 
-  const item: AuditLogListItem = {
-    id: nextId(createdAt),
+  return {
     createdAt,
     action: input.action,
     entityType: input.entityType,
@@ -343,6 +348,17 @@ export function createAuditLog(
     severity: input.severity ?? defaultSeverityFor(input.action),
     summary: isNonEmptyString(input.summary) ? input.summary.trim() : null,
     metadata: sanitizedMetadata,
+  };
+}
+
+export function createAuditLog(
+  input: CreateAuditLogInput,
+  store: AuditLogStore = defaultStore,
+): AuditLogListItem {
+  const normalized = normalizeAuditLogInput(input);
+  const item: AuditLogListItem = {
+    id: nextId(normalized.createdAt),
+    ...normalized,
   };
 
   store.add(item);

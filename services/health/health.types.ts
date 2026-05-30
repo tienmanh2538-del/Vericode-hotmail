@@ -22,6 +22,7 @@ export type OperationalCheckId =
   | 'EMAIL_WORKER_PIPELINE'
   | 'DELTA_POLLING'
   | 'SUBSCRIPTION_RENEWAL'
+  | 'QUEUE_REDIS'
   | 'TELEGRAM_RELIABILITY'
   | 'WEBHOOK_HEALTH';
 
@@ -66,6 +67,14 @@ export interface HealthOverview {
   pollingStale: number;
   recentTelegramFailures: number;
   lastCodeSentAt: Date | null;
+  /** Most recent email the pipeline processed (any ProcessedMessage). */
+  lastProcessedEmailAt: Date | null;
+  /** Most recent delta-polling cycle across all mailboxes. */
+  lastPollingRunAt: Date | null;
+  /** Most recent subscription renewal across all subscriptions. */
+  lastRenewalRunAt: Date | null;
+  /** Sanitized + truncated most-recent mailbox error, or null. */
+  lastErrorShort: string | null;
   overall: HealthLevel;
 }
 

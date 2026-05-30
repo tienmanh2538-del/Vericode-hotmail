@@ -1,7 +1,12 @@
-export type AppEnv = 'development' | 'test' | 'production';
+export type AppEnv = 'development' | 'test' | 'staging' | 'production';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
-export const APP_ENV_VALUES: readonly AppEnv[] = ['development', 'test', 'production'] as const;
+export const APP_ENV_VALUES: readonly AppEnv[] = [
+  'development',
+  'test',
+  'staging',
+  'production',
+] as const;
 export const LOG_LEVEL_VALUES: readonly LogLevel[] = ['debug', 'info', 'warn', 'error'] as const;
 
 export interface EnvValues {
@@ -19,6 +24,13 @@ export interface EnvValues {
   TELEGRAM_ADMIN_ALERT_CHAT_ID?: string;
   ENCRYPTION_KEY?: string;
   AUTH_DEV_DEMO_USER?: string;
+  // Staging-only admin passphrase. When set AND APP_ENV=staging, the /login
+  // form accepts this passphrase and issues a signed admin session cookie.
+  // Empty/unset ⇒ staging admin stays locked (fail-closed). Never logged.
+  STAGING_ADMIN_PASSWORD?: string;
+  // Optional dedicated HMAC key for the staging session cookie. Falls back to
+  // ENCRYPTION_KEY when unset. Never logged.
+  STAGING_ADMIN_SESSION_SECRET?: string;
   REDIS_URL?: string;
   EMAIL_QUEUE_NAME?: string;
   EMAIL_WORKER_CONCURRENCY?: string;

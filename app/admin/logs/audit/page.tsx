@@ -5,8 +5,8 @@ import {
   type AuditLogAction,
   type AuditLogEntityType,
   type AuditLogListFilters,
-  listAuditLogs,
 } from "@/services/logs/audit-log.service";
+import { listAuditLogsFromDb } from "@/services/logs/prisma-audit-log-store";
 import { AuditLogTable } from "@/components/tables/AuditLogTable";
 import "../../customers/customers.css";
 import "./audit-log.css";
@@ -50,7 +50,7 @@ function trimOrUndefined(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-export default function AuditLogPage({ searchParams }: AuditLogPageProps) {
+export default async function AuditLogPage({ searchParams }: AuditLogPageProps) {
   const rawAction = firstString(searchParams?.action);
   const rawEntityType = firstString(searchParams?.entityType);
   const rawSearch = firstString(searchParams?.search);
@@ -66,7 +66,7 @@ export default function AuditLogPage({ searchParams }: AuditLogPageProps) {
     limit: 500,
   };
 
-  const result = listAuditLogs(filters);
+  const result = await listAuditLogsFromDb(filters);
 
   const actionOptions = Array.from(AUDIT_LOG_ACTIONS).sort();
   const entityTypeOptions = Array.from(AUDIT_LOG_ENTITY_TYPES).sort();

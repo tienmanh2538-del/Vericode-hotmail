@@ -18,11 +18,18 @@ describe('loadEnv', () => {
   });
 
   it('falls back when enum is invalid and records a warning', () => {
-    const result = loadEnv({ APP_ENV: 'staging', LOG_LEVEL: 'verbose' });
+    // 'qa' is not a known APP_ENV ('staging' IS valid as of TASK-040).
+    const result = loadEnv({ APP_ENV: 'qa', LOG_LEVEL: 'verbose' });
     expect(result.values.APP_ENV).toBe('development');
     expect(result.values.LOG_LEVEL).toBe('info');
     expect(result.warnings.some((w) => w.includes('APP_ENV'))).toBe(true);
     expect(result.warnings.some((w) => w.includes('LOG_LEVEL'))).toBe(true);
+  });
+
+  it('accepts staging as a first-class APP_ENV (TASK-040)', () => {
+    const result = loadEnv({ APP_ENV: 'staging' });
+    expect(result.values.APP_ENV).toBe('staging');
+    expect(result.warnings.some((w) => w.includes('APP_ENV'))).toBe(false);
   });
 
   it('does not throw in production when secrets are absent (per-module pattern)', () => {

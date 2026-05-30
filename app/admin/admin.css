@@ -105,6 +105,27 @@
   white-space: nowrap;
 }
 
+.admin-topbar__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.admin-topbar__logout {
+  padding: 0.3rem 0.75rem;
+  border-radius: 0.375rem;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.admin-topbar__logout:hover {
+  background: #f1f5f9;
+}
+
 .admin-page__heading {
   margin: 0 0 1.5rem;
   font-size: 1.5rem;
@@ -180,6 +201,12 @@
   background: #fef2f2;
   border-color: #fca5a5;
   color: #991b1b;
+}
+
+.admin-banner--warning {
+  background: #fffbeb;
+  border-color: #fcd34d;
+  color: #92400e;
 }
 
 .admin-connect {

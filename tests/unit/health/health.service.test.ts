@@ -1,14 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mailboxFindMany, processedGroupBy } = vi.hoisted(() => ({
-  mailboxFindMany: vi.fn(),
-  processedGroupBy: vi.fn(),
-}));
+const { mailboxFindMany, processedGroupBy, processedAggregate, subscriptionAggregate } =
+  vi.hoisted(() => ({
+    mailboxFindMany: vi.fn(),
+    processedGroupBy: vi.fn(),
+    processedAggregate: vi.fn(),
+    subscriptionAggregate: vi.fn(),
+  }));
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
     mailbox: { findMany: mailboxFindMany },
-    processedMessage: { groupBy: processedGroupBy },
+    processedMessage: { groupBy: processedGroupBy, aggregate: processedAggregate },
+    graphSubscription: { aggregate: subscriptionAggregate },
   },
 }));
 
@@ -165,14 +169,15 @@ describe('classifyEmailWorkerWiring', () => {
 });
 
 describe('gatherEmailWorkerWiringEvidence (real repo)', () => {
-  it('reports no production entrypoint for the current repo state', () => {
-    // TASK-031 ground truth: createEmailWorker exists but there is no
-    // worker:email script and no scripts/run-email-worker.ts runner.
+  it('reports the production entrypoint now exists (TASK-040)', () => {
+    // TASK-040 ground truth: the worker:email npm script and
+    // scripts/run-email-worker.ts runner are now present and wired to the real
+    // Graph message pipeline.
     const evidence = gatherEmailWorkerWiringEvidence();
     expect(evidence.canInspect).toBe(true);
-    expect(evidence.hasNpmScript).toBe(false);
-    expect(evidence.hasRunnerFile).toBe(false);
-    expect(classifyEmailWorkerWiring(evidence).status).toBe('CRITICAL');
+    expect(evidence.hasNpmScript).toBe(true);
+    expect(evidence.hasRunnerFile).toBe(true);
+    expect(classifyEmailWorkerWiring(evidence).status).toBe('PASS');
   });
 
   it('returns canInspect=false for a non-existent root', () => {
@@ -318,6 +323,11 @@ describe('loadHealthDashboard', () => {
   beforeEach(() => {
     mailboxFindMany.mockReset();
     processedGroupBy.mockReset();
+    processedAggregate.mockReset();
+    subscriptionAggregate.mockReset();
+    // TASK-040 added two runtime "last run" aggregates; default them to empty.
+    processedAggregate.mockResolvedValue({ _max: { createdAt: null } });
+    subscriptionAggregate.mockResolvedValue({ _max: { lastRenewedAt: null } });
   });
 
   it('returns a safe error result when the DB read fails', async () => {
@@ -347,7 +357,8 @@ describe('loadHealthDashboard', () => {
       const worker = result.data.operationalChecks.find(
         (c) => c.id === 'EMAIL_WORKER_PIPELINE',
       );
-      expect(worker?.status).toBe('CRITICAL');
+      // TASK-040 wired the production entrypoint, so this is now PASS.
+      expect(worker?.status).toBe('PASS');
     }
   });
 

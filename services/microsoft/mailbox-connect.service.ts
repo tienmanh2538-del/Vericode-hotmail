@@ -1,11 +1,8 @@
 import { prisma as defaultPrisma } from '@/lib/prisma';
 import { encryptSecret as defaultEncryptSecret } from '@/lib/security/encryption';
 import { createLogger } from '@/lib/logger';
-import {
-  createAuditLog as defaultCreateAuditLog,
-  type AuditLogListItem,
-  type CreateAuditLogInput,
-} from '@/services/logs/audit-log.service';
+import { type CreateAuditLogInput } from '@/services/logs/audit-log.service';
+import { createAuditLogInDb as defaultCreateAuditLog } from '@/services/logs/prisma-audit-log-store';
 
 const logger = createLogger();
 
@@ -66,7 +63,7 @@ export interface PrismaClientLike {
 export interface SaveConnectedMailboxDeps {
   prisma?: PrismaClientLike;
   encryptSecret?: (plaintext: string) => string;
-  createAuditLog?: (input: CreateAuditLogInput) => AuditLogListItem;
+  createAuditLog?: (input: CreateAuditLogInput) => unknown;
   now?: () => Date;
 }
 
@@ -165,7 +162,7 @@ export async function saveConnectedMailbox(
   }
 
   try {
-    writeAuditLog({
+    await writeAuditLog({
       action: 'MAILBOX_CONNECTED',
       entityType: 'mailbox',
       entityId: saved.id,

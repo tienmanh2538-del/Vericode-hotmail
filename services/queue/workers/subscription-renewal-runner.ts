@@ -13,7 +13,7 @@ import {
 } from '@/services/microsoft/refresh-access-token.service';
 import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
 import { renewGraphSubscription } from '@/services/microsoft/graph-subscription.service';
-import { createAuditLog } from '@/services/logs/audit-log.service';
+import { createAuditLogInDb } from '@/services/logs/prisma-audit-log-store';
 import {
   runSubscriptionRenewalOnce,
   SubscriptionRenewalTokenError,
@@ -244,10 +244,11 @@ export function createGraphRenewSubscriptionPort(): RenewSubscriptionPort {
 // ---------------------------------------------------------------------------
 
 export const prismaRenewalAuditPort: RenewalAuditPort = {
-  recordRenewed(input) {
+  async recordRenewed(input) {
     // Metadata is intentionally limited to non-sensitive identifiers; the audit
-    // service additionally sanitizes any secret-like keys.
-    createAuditLog({
+    // service additionally sanitizes any secret-like keys. Persisted to the DB
+    // so the renewal worker's audit entries are visible in the admin UI.
+    await createAuditLogInDb({
       action: 'SUBSCRIPTION_RENEWED',
       entityType: 'subscription',
       entityId: input.graphSubscriptionId,

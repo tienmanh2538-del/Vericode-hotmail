@@ -138,10 +138,16 @@ export function getDefaultCodeEventLogStore(): CodeEventLogStore {
   return defaultStore;
 }
 
-export function recordCodeEvent(
+/**
+ * A validated code event WITHOUT a generated id. Shared by the in-memory store
+ * (counter id) and the DB store (Prisma-generated id). The masked code is
+ * already proven safe (never a raw verification code) here.
+ */
+export type NormalizedCodeEvent = Omit<CodeEventLogItem, 'id'>;
+
+export function normalizeCodeEventInput(
   input: RecordCodeEventInput,
-  store: CodeEventLogStore = defaultStore,
-): CodeEventLogItem {
+): NormalizedCodeEvent {
   if (!isNonEmptyString(input?.mailboxEmail)) {
     throw new Error('code-event-log: mailboxEmail is required');
   }
@@ -151,8 +157,7 @@ export function recordCodeEvent(
     ? assertSafeMaskedCode(input.maskedCode.trim())
     : undefined;
 
-  const item: CodeEventLogItem = {
-    id: nextId(createdAt),
+  return {
     createdAt,
     receivedAt: toIsoString(input.receivedAt),
     mailboxEmail: input.mailboxEmail.trim(),
@@ -168,6 +173,17 @@ export function recordCodeEvent(
       : undefined,
     source: input.source ?? 'mock',
     message: isNonEmptyString(input.message) ? input.message.trim() : undefined,
+  };
+}
+
+export function recordCodeEvent(
+  input: RecordCodeEventInput,
+  store: CodeEventLogStore = defaultStore,
+): CodeEventLogItem {
+  const normalized = normalizeCodeEventInput(input);
+  const item: CodeEventLogItem = {
+    id: nextId(normalized.createdAt),
+    ...normalized,
   };
 
   store.add(item);
