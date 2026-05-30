@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "purpose": "TASK-037 E2E mock-flow fixture: a valid Facebook/Meta verification email.",
+    "warning": "Synthetic data only. Not a real mailbox, sender, chat id, or verification code."
+  },
+  "messageId": "e2e-mock-flow-fb-0001",
+  "mailboxId": "mailbox_e2e_alpha",
+  "mailboxEmail": "relay.e2e@example.test",
+  "fromEmail": "security@facebookmail.com",
+  "fromName": "Facebook Security",
+  "subject": "Your Facebook confirmation code",
+  "receivedAt": "2026-05-30T10:00:00.000Z",
+  "bodyPreview": "Your Facebook confirmation code is 362844.",
+  "body": "Hi,\n\nYour Facebook confirmation code is 362844. Enter it to confirm your account.\n\nThanks,\nThe Facebook team"
+}

@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "purpose": "TASK-037 E2E mock-flow fixture: a non Facebook/Meta email that must NOT be relayed.",
+    "warning": "Synthetic data only. The number in the body is an invoice number, not a verification code."
+  },
+  "messageId": "e2e-mock-flow-news-0001",
+  "mailboxId": "mailbox_e2e_alpha",
+  "mailboxEmail": "relay.e2e@example.test",
+  "fromEmail": "newsletter@example.com",
+  "fromName": "Weekly News",
+  "subject": "Your weekly update",
+  "receivedAt": "2026-05-30T10:05:00.000Z",
+  "bodyPreview": "Your invoice number is 123456.",
+  "body": "Hello,\n\nYour invoice number is 123456. Thanks for subscribing to our weekly update.\n\nCheers,\nThe Weekly News team"
+}
