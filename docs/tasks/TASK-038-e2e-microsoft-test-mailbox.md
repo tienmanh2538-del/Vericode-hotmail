@@ -85,7 +85,7 @@ A. Automated E2E an toàn cho CI:
 - Không cần secret thật.
 
 B. Manual staging checklist:
-- Tạo file `docs/reports/task-038-microsoft-test-mailbox-manual-checklist.md`
+- Tạo file `docs/reports/TASK-038-microsoft-test-mailbox-manual-checklist.md`
 - Checklist này hướng dẫn người vận hành test với mailbox Microsoft thật.
 - Không chứa token, secret, email body thật, full verification code thật.
 
@@ -100,7 +100,7 @@ B chỉ dùng để ghi lại cách kiểm tra thật ngoài CI.
 - `tests/e2e/microsoft-test-mailbox.spec.ts`
 - `tests/e2e/helpers/*` nếu cần helper test
 - `tests/fixtures/email-samples/*` nếu cần sample email giả
-- `docs/reports/task-038-microsoft-test-mailbox-manual-checklist.md` nếu cần checklist test thật
+- `docs/reports/TASK-038-microsoft-test-mailbox-manual-checklist.md` nếu cần checklist test thật
 - `package.json` chỉ khi cần thêm script test riêng, ví dụ `test:e2e:microsoft`
 - config test hiện có, chỉ khi cần để test chạy đúng và không phá task khác
 
