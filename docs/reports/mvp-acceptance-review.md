@@ -1,7 +1,7 @@
 # MVP Acceptance Review — Verification Code Relay Tool
 
 - **Review date:** 2026-05-31
-- **Branch:** `feature/task-040-mvp-acceptance-review`
+- **Review branch:** TASK-040 review branch
 - **Current commit:** `2c0b77f`
 - **Reviewer:** Claude Code
 - **Scope:** Review only. No application code, tests, configs, or `.env*` files were modified. Findings are recorded, not fixed.
@@ -46,7 +46,7 @@ All listed documents were read in full during this review; the code-level contro
 | Command | Result | Notes |
 |---|---|---|
 | `git rev-parse --short HEAD` | `2c0b77f` | Current commit on the review branch |
-| `git branch --show-current` | `feature/task-040-mvp-acceptance-review` | Correct review branch |
+| `Current branch was verified locally` | Correct review branch |
 | `git status --short` | Only the new report file is untracked | No tracked application files were modified by this review. Temporary `_verify_out.txt` / `_verify_clean.txt` capture files created during review were deleted and must not be committed. |
 | `npm run verify` | **PASS — exit code 0** | Runs `lint && typecheck && test && build`; the chain reaching exit 0 means every step passed (build only runs if tests pass). |
 | └ `eslint .` (lint) | PASS | No lint errors reported |
@@ -163,7 +163,7 @@ Columns: # | Area | Expected | Evidence | Status | Notes
 
 ## Known Gaps / Risks
 
-- **CI not observed green on this branch (criterion 8).** No push was performed during this review, so GitHub Actions has not been confirmed passing for `feature/task-040-mvp-acceptance-review`. Local `npm run verify` is green, which is a strong proxy but not the same as a CI run.
+- CI status was not checked during this review. Local verify passed.
 - **Gemini review of this report/branch pending (criterion 7).** The TASK-036 `security-review.md` concludes 0 Critical / 0 High (with independent Gemini review marked "pending" there), and TASK-040-preflight records a Gemini PASS with only Low items. But TASK-040 §9 specifically requires a Gemini review of THIS new report + the branch diff, which has not happened yet.
 - **Live Microsoft + Telegram round-trips are manual and not yet recorded.** Area 28 / spec criterion 5 are proven via mock-injected E2E and a documented checklist, but the TASK-038 checklist "Result" table is unfilled — no live mailbox→group delivery has been logged. Consistent with MVP scope ("chưa kết nối Hotmail thật", "chưa deploy production") but a real gap for full sign-off.
 - **LOW (informational) — delta-polling source label.** In `services/queue/workers/email-worker.ts` `toPipelineJob`, both the delta-polling branch and the webhook branch set `source: 'webhook'` on the pipeline job. Functionally harmless (both correctly run the same pipeline and dedup is by `graphMessageId`), but the original source is not preserved for downstream observability. Recorded as a finding; not fixed in this task.
