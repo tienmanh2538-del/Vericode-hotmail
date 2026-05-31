@@ -39,6 +39,53 @@ interface ApiSuccessResponse {
 
 type ApiResponse = ApiErrorResponse | ApiSuccessResponse;
 
+type ProcessStatus =
+  | "SENT"
+  | "SKIPPED_NOT_FACEBOOK_VERIFICATION"
+  | "SKIPPED_LOW_CONFIDENCE"
+  | "SKIPPED_NO_CODE"
+  | "SKIPPED_DUPLICATE"
+  | "SKIPPED_NO_TELEGRAM_MAPPING"
+  | "FAILED_TELEGRAM_SEND"
+  | "FAILED_UNEXPECTED";
+
+interface ProcessResult {
+  status: ProcessStatus;
+  success: boolean;
+  platform?: string;
+  confidence?: number;
+  maskedCode?: string;
+  reason?: string;
+}
+
+interface ProcessSuccessResponse {
+  ok: true;
+  data: ProcessResult;
+}
+
+type ProcessResponse = ApiErrorResponse | ProcessSuccessResponse;
+
+const PROCESS_STATUS_LABELS: Record<ProcessStatus, string> = {
+  SENT: "✅ Sent to Telegram",
+  SKIPPED_NOT_FACEBOOK_VERIFICATION:
+    "🚫 Skipped — not a Facebook/Meta verification email",
+  SKIPPED_LOW_CONFIDENCE: "⚠️ Skipped — code confidence too low",
+  SKIPPED_NO_CODE: "⚠️ Skipped — no verification code found",
+  SKIPPED_DUPLICATE: "↩️ Skipped — duplicate (already processed)",
+  SKIPPED_NO_TELEGRAM_MAPPING:
+    "⚠️ Skipped — no active Telegram mapping for this mailbox",
+  FAILED_TELEGRAM_SEND: "❌ Telegram send failed",
+  FAILED_UNEXPECTED: "❌ Unexpected error",
+};
+
+function processResultTone(status: ProcessStatus): "success" | "warn" | "error" {
+  if (status === "SENT") return "success";
+  if (status === "FAILED_TELEGRAM_SEND" || status === "FAILED_UNEXPECTED") {
+    return "error";
+  }
+  return "warn";
+}
+
 function buildPayload(values: MockEmailFormValues) {
   return {
     mailboxEmail: values.mailboxEmail.trim(),
@@ -57,6 +104,9 @@ export function MockEmailForm() {
   const [formError, setFormError] = useState<string | null>(null);
   const [preview, setPreview] = useState<MockEmailSafePreview | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [processResult, setProcessResult] = useState<ProcessResult | null>(null);
+  const [processError, setProcessError] = useState<string | null>(null);
 
   function update<K extends keyof MockEmailFormValues>(
     key: K,
@@ -70,6 +120,8 @@ export function MockEmailForm() {
     setErrors({});
     setFormError(null);
     setPreview(null);
+    setProcessResult(null);
+    setProcessError(null);
   }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -102,6 +154,41 @@ export function MockEmailForm() {
       setFormError(message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function onProcess() {
+    setSending(true);
+    setErrors({});
+    setFormError(null);
+    setProcessResult(null);
+    setProcessError(null);
+
+    try {
+      const response = await fetch("/api/mock-email/process", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(buildPayload(values)),
+      });
+      const json = (await response.json()) as ProcessResponse;
+
+      if (!json.ok) {
+        if (json.fields) {
+          setErrors(json.fields);
+        }
+        setProcessError(json.error);
+        return;
+      }
+
+      setProcessResult(json.data);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Could not process mock email";
+      setProcessError(message);
+    } finally {
+      setSending(false);
     }
   }
 
@@ -301,18 +388,72 @@ export function MockEmailForm() {
             type="button"
             className="customer-form__cancel"
             onClick={reset}
-            disabled={submitting}
+            disabled={submitting || sending}
           >
             Reset
           </button>
           <button
             type="submit"
             className="customer-form__submit"
-            disabled={submitting}
+            disabled={submitting || sending}
           >
             {submitting ? "Validating…" : "Validate mock email"}
           </button>
+          <button
+            type="button"
+            className="customer-form__submit mock-email-form__send"
+            onClick={onProcess}
+            disabled={submitting || sending}
+          >
+            {sending ? "Processing…" : "Process & send to Telegram"}
+          </button>
         </div>
+
+        {processError && (
+          <p className="customer-form__form-error" role="alert">
+            {processError}
+          </p>
+        )}
+
+        {processResult && (
+          <div
+            className={`mock-email-result mock-email-result--${processResultTone(
+              processResult.status,
+            )}`}
+            role="status"
+            aria-live="polite"
+          >
+            <p className="mock-email-result__status">
+              {PROCESS_STATUS_LABELS[processResult.status]}
+            </p>
+            <dl className="mock-email-result__meta">
+              {processResult.platform && (
+                <div className="mock-email-result__row">
+                  <dt>Platform</dt>
+                  <dd>{processResult.platform}</dd>
+                </div>
+              )}
+              {typeof processResult.confidence === "number" && (
+                <div className="mock-email-result__row">
+                  <dt>Confidence</dt>
+                  <dd>{processResult.confidence}</dd>
+                </div>
+              )}
+              {processResult.maskedCode && (
+                <div className="mock-email-result__row">
+                  <dt>Code (masked)</dt>
+                  <dd>{processResult.maskedCode}</dd>
+                </div>
+              )}
+              {processResult.reason && (
+                <div className="mock-email-result__row">
+                  <dt>Detail</dt>
+                  <dd>{processResult.reason}</dd>
+                </div>
+              )}
+            </dl>
+          </div>
+        )}
       </form>
 
       <aside

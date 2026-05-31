@@ -61,7 +61,12 @@ export function TelegramMappingForm({
     : INITIAL_TELEGRAM_MAPPING_FORM_STATE;
 
   const [state, formAction] = useFormState(action, initial);
-  const errors = state.errors ?? {};
+  // `useFormState` can hand back `undefined` for a tick while a server action
+  // that ends in `redirect()` settles (the success path here). Falling back to
+  // the initial state keeps the form from crashing during that transition and
+  // lets the redirect/list refresh finish cleanly.
+  const safeState = state ?? initial;
+  const errors = safeState.errors ?? {};
 
   if (mailboxes.length === 0) {
     return (
@@ -73,9 +78,9 @@ export function TelegramMappingForm({
 
   return (
     <form action={formAction} className="customer-form" noValidate>
-      {state.formError && (
+      {safeState.formError && (
         <p className="customer-form__form-error" role="alert">
-          {state.formError}
+          {safeState.formError}
         </p>
       )}
 
@@ -86,7 +91,7 @@ export function TelegramMappingForm({
         <select
           id="mapping-mailbox"
           name="mailboxId"
-          defaultValue={state.values.mailboxId}
+          defaultValue={safeState.values.mailboxId}
           aria-invalid={errors.mailboxId ? "true" : undefined}
           aria-describedby={errors.mailboxId ? "mapping-mailbox-error" : undefined}
           className="customer-form__input"
@@ -119,7 +124,7 @@ export function TelegramMappingForm({
           id="mapping-group-name"
           name="telegramGroupName"
           type="text"
-          defaultValue={state.values.telegramGroupName}
+          defaultValue={safeState.values.telegramGroupName}
           placeholder="Client A verification group"
           aria-invalid={errors.telegramGroupName ? "true" : undefined}
           aria-describedby={
@@ -144,7 +149,7 @@ export function TelegramMappingForm({
           id="mapping-chat-id"
           name="telegramChatId"
           type="text"
-          defaultValue={state.values.telegramChatId}
+          defaultValue={safeState.values.telegramChatId}
           placeholder="-1001234567890 or @channelusername"
           aria-invalid={errors.telegramChatId ? "true" : undefined}
           aria-describedby={
@@ -176,7 +181,7 @@ export function TelegramMappingForm({
           id="mapping-topic-name"
           name="telegramTopicName"
           type="text"
-          defaultValue={state.values.telegramTopicName}
+          defaultValue={safeState.values.telegramTopicName}
           placeholder="Client A — verification topic"
           aria-invalid={errors.telegramTopicName ? "true" : undefined}
           aria-describedby={
@@ -201,7 +206,7 @@ export function TelegramMappingForm({
           name="telegramThreadId"
           type="text"
           inputMode="numeric"
-          defaultValue={state.values.telegramThreadId}
+          defaultValue={safeState.values.telegramThreadId}
           placeholder="e.g. 42"
           aria-invalid={errors.telegramThreadId ? "true" : undefined}
           aria-describedby={
@@ -233,7 +238,7 @@ export function TelegramMappingForm({
         <select
           id="mapping-status"
           name="status"
-          defaultValue={state.values.status}
+          defaultValue={safeState.values.status}
           aria-invalid={errors.status ? "true" : undefined}
           aria-describedby={errors.status ? "mapping-status-error" : undefined}
           className="customer-form__input"

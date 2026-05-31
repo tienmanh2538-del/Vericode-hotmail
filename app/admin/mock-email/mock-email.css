@@ -40,3 +40,65 @@
   font-size: 0.9rem;
   line-height: 1.5;
 }
+
+.mock-email-form__send {
+  background: #1f6feb;
+}
+
+.mock-email-form__send:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.mock-email-result {
+  margin-top: 1rem;
+  border: 1px solid #d0d7de;
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  background: #f6f8fa;
+}
+
+.mock-email-result--success {
+  border-left-color: #1a7f37;
+  background: #eef9f0;
+}
+
+.mock-email-result--warn {
+  border-left-color: #9a6700;
+  background: #fff8e6;
+}
+
+.mock-email-result--error {
+  border-left-color: #cf222e;
+  background: #fdf0f0;
+}
+
+.mock-email-result__status {
+  margin: 0;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.mock-email-result__meta {
+  margin: 0.5rem 0 0;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.mock-email-result__row {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.mock-email-result__row dt {
+  margin: 0;
+  min-width: 7rem;
+  color: #57606a;
+}
+
+.mock-email-result__row dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

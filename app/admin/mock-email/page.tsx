@@ -11,10 +11,13 @@ export default function MockEmailPage() {
         <div>
           <h2 className="admin-page__heading">Mock email input</h2>
           <p className="telegram-page__intro">
-            Paste or build a synthetic email payload for parser development.
-            Nothing here is sent to Telegram or read from Microsoft Graph. The
-            preview is server-validated and only echoes a short body snippet.
-            Use fake addresses and fake verification codes only.
+            Build a synthetic email payload to exercise the verification
+            pipeline. <strong>Validate mock email</strong> only server-validates
+            the payload and echoes a short, safe JSON preview — nothing is sent.{" "}
+            <strong>Process &amp; send to Telegram</strong> runs the full
+            pipeline (detect → extract → dedupe) and, on success, delivers a real
+            message to the mailbox&apos;s active Telegram mapping. Microsoft Graph
+            is never read. Use fake addresses and fake verification codes only.
           </p>
         </div>
       </div>
