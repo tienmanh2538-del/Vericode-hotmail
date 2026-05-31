@@ -23,21 +23,20 @@ từng khách hàng.
 ## 2. Current status
 
 - **Tiến độ:** Hoàn thành tới **TASK-041** (Sprint 0 → Sprint 9 + TASK-041).
-- **Branch hiện tại:** `feature/task-041-flexible-telegram-routing`
-- **Main branch (dùng làm base cho PR):** `feature/task-002-quality-gates`
-- **Commit mới nhất:**
-  - `5887cd6 fix: add logs index page`
-  - `0c04250 feat: wire mock email processing to Telegram`
-  - `dbf4a6a chore: avoid false positive in MVP acceptance report`
-  - `960345a feat: support shared Telegram group topic routing` (lõi TASK-041)
-  - `b268ccb docs: add MVP acceptance review` (TASK-040)
-- **GitHub push status:** Branch `feature/task-041-flexible-telegram-routing` đã có
-  remote tracking (`origin/feature/task-041-flexible-telegram-routing`) ở commit
-  `5887cd6` → đã push lên GitHub. Working tree sạch (clean).
-- **`npm run verify` status:** Đã chạy lại trên branch hiện tại (`5887cd6`) →
-  **PASS** (exit 0): lint + typecheck OK, **684/684 test pass (56 test files)**, Next
-  production build thành công. (Bản MVP review trước đó ghi 670 test; số tăng do 2 commit
-  sau review.)
+- **Branch hiện tại:** nhánh feature của TASK-041 (flexible Telegram routing). Tên nhánh
+  chính xác kiểm tra trực tiếp bằng `git branch --show-current`.
+- **Main branch (dùng làm base cho PR):** nhánh base của Sprint 0 (quality gates). Xác nhận
+  bằng `git` / GitHub khi cần — không snapshot cứng tên nhánh ở đây vì thông tin Git là động.
+- **Commit mới nhất:** xem trực tiếp bằng `git log --oneline --decorate -n 10`. Tại thời điểm
+  bàn giao, đỉnh nhánh là các commit: "add logs index page", "wire mock email processing to
+  Telegram", "avoid false positive in MVP acceptance report", "support shared Telegram group
+  topic routing" (lõi TASK-041), "add MVP acceptance review" (TASK-040).
+- **GitHub push status:** nhánh TASK-041 đã được push lên GitHub và có remote tracking ở commit
+  mới nhất; working tree sạch. Trạng thái cập nhật kiểm tra bằng `git status` / `git log` /
+  GitHub khi cần.
+- **`npm run verify` status:** Đã chạy lại trên branch hiện tại → **PASS** (exit 0): lint +
+  typecheck OK, **684/684 test pass (56 test files)**, Next production build thành công. (Bản
+  MVP review trước đó ghi 670 test; số tăng do 2 commit thêm sau review.)
 
 ---
 
@@ -500,7 +499,8 @@ Tổng hợp từ MVP acceptance review (CONDITIONAL PASS), security review, và
 3. **Tạo task file** `docs/tasks/TASK-042-<slug>.md` theo cấu trúc các task hiện có
    (Mục tiêu / Bối cảnh / Scope được làm / Scope KHÔNG làm / Yêu cầu chức năng / Bảo mật /
    DB / Service / Tests / Lệnh kiểm tra / Tiêu chí nghiệm thu / Format báo cáo).
-4. **Tạo branch** `feature/task-042-<slug>` (base từ branch hiện tại hoặc theo quy ước repo).
+4. **Tạo nhánh Git mới** cho TASK-042 theo quy ước đặt tên nhánh của repo (tiền tố `feature/`
+   + mã task + mô tả ngắn), base từ nhánh hiện tại hoặc theo quy ước repo.
 5. **Cho Claude làm đúng scope:** khai báo file sẽ sửa trước, không vượt scope, chạy
    `npm run verify` sau khi sửa.
 6. **Cho Gemini review** (PASS/FAIL, không còn Critical/High) trước khi commit/nghiệm thu.
