@@ -144,6 +144,7 @@ lưu ý:   - Tối ưu hóa Delta Polling: Hỗ trợ bootstrap mailbox cực l�
   - Note from TASK-031: cover trường hợp webhook + delta polling cùng thấy 1 graphMessageId — Telegram phải nhận đúng 1 lần (dựa vào ProcessedMessage unique [mailboxId, graphMessageId]).
 
 \- TASK-039: Staging deployment setup
+\- TASK-040 Preflight: Operational Readiness Before MVP Acceptance Review
 
 \- TASK-040: MVP acceptance review
 
