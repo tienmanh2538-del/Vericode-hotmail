@@ -31,6 +31,10 @@ export interface MailboxDetailTelegramMapping {
   status: TelegramMappingStatusValue;
   telegramGroupName: string | null;
   telegramChatIdMasked: string;
+  // TASK-041 — forum topic destination. `telegramThreadId` is not sensitive
+  // (it is a public message id within the group), so it is shown unmasked.
+  telegramTopicName: string | null;
+  telegramThreadId: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -117,6 +121,8 @@ export async function getMailboxDetailById(
           status: true,
           telegramGroupName: true,
           telegramChatId: true,
+          telegramTopicName: true,
+          telegramThreadId: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -171,6 +177,8 @@ export async function getMailboxDetailById(
       status: mapping.status as TelegramMappingStatusValue,
       telegramGroupName: mapping.telegramGroupName,
       telegramChatIdMasked: maskChatId(mapping.telegramChatId),
+      telegramTopicName: mapping.telegramTopicName ?? null,
+      telegramThreadId: mapping.telegramThreadId ?? null,
       createdAt: mapping.createdAt,
       updatedAt: mapping.updatedAt,
     })),

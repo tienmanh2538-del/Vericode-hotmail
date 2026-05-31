@@ -11,12 +11,21 @@ const DEFAULT_TEST_MESSAGE = '✅ Verification Tool Telegram test message';
 interface TestSendBody {
   chatId?: unknown;
   text?: unknown;
+  messageThreadId?: unknown;
 }
 
 function readChatId(body: TestSendBody): string | null {
   if (typeof body.chatId !== 'string') return null;
   const trimmed = body.chatId.trim();
   return trimmed.length === 0 ? null : trimmed;
+}
+
+// Optional forum topic. Returns undefined for "send to the main group". Format
+// is validated by the sender; an empty value is treated as "no topic".
+function readMessageThreadId(body: TestSendBody): string | undefined {
+  if (typeof body.messageThreadId !== 'string') return undefined;
+  const trimmed = body.messageThreadId.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 function readText(body: TestSendBody): string {
@@ -45,9 +54,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const text = readText(body);
+  const messageThreadId = readMessageThreadId(body);
 
   try {
-    const result = await sendTelegramMessage({ chatId, text });
+    const result = await sendTelegramMessage({ chatId, text, messageThreadId });
     return NextResponse.json({
       ok: true,
       message: 'Telegram test message sent',

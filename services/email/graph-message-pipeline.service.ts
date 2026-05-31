@@ -118,6 +118,9 @@ export interface GraphMessageFetchPort {
 export interface TelegramMappingLookup {
   telegramChatId: string;
   telegramGroupName?: string | null;
+  // TASK-041 — when present, the code is delivered to this forum topic via
+  // `message_thread_id`. Absent/null keeps plain group delivery unchanged.
+  telegramThreadId?: string | null;
 }
 
 export interface TelegramMappingPort {
@@ -830,6 +833,7 @@ export async function processGraphMessageJob(
     await deps.telegramSender.sendTelegramMessage({
       chatId: mapping.telegramChatId,
       text: telegramText,
+      messageThreadId: mapping.telegramThreadId ?? undefined,
     });
   } catch (err: unknown) {
     const reason =

@@ -108,7 +108,11 @@ function makeHarness(
     graphMessage?: GraphMailMessage;
     graphError?: Error;
     mapping?:
-      | { telegramChatId: string; telegramGroupName?: string | null }
+      | {
+          telegramChatId: string;
+          telegramGroupName?: string | null;
+          telegramThreadId?: string | null;
+        }
       | null;
     sendError?: Error;
   } = {},
@@ -261,6 +265,38 @@ describe('processGraphMessageJob', () => {
     expect(
       auditCalls.every((a) => !JSON.stringify(a).includes(VERIFICATION_CODE)),
     ).toBe(true);
+  });
+
+  it('Case 1b — forwards message_thread_id to the sender when the mapping has a topic', async () => {
+    const harness = makeHarness({
+      mapping: {
+        telegramChatId: CHAT_ID,
+        telegramGroupName: TELEGRAM_GROUP,
+        telegramThreadId: '123',
+      },
+    });
+
+    const result = await processGraphMessageJob(makeJob(), harness.deps);
+
+    expect(result.status).toBe('CODE_SENT');
+    const sentArg = harness.telegramSender.sendMock.mock.calls[0][0] as {
+      chatId: string;
+      messageThreadId?: string;
+    };
+    expect(sentArg.chatId).toBe(CHAT_ID);
+    expect(sentArg.messageThreadId).toBe('123');
+  });
+
+  it('Case 1c — does NOT set message_thread_id when the mapping has no topic', async () => {
+    const harness = makeHarness();
+
+    const result = await processGraphMessageJob(makeJob(), harness.deps);
+
+    expect(result.status).toBe('CODE_SENT');
+    const sentArg = harness.telegramSender.sendMock.mock.calls[0][0] as {
+      messageThreadId?: string;
+    };
+    expect(sentArg.messageThreadId).toBeUndefined();
   });
 
   it('Case 2 — returns SKIPPED_DUPLICATE when the same Graph message id was already processed', async () => {

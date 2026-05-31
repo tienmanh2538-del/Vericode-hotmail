@@ -29,6 +29,8 @@ interface MappingForSerialize {
   mailboxEmail: string | null;
   telegramChatId: string;
   telegramGroupName: string | null;
+  telegramThreadId: string | null;
+  telegramTopicName: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -41,6 +43,8 @@ function serialize(mapping: MappingForSerialize) {
     mailboxEmail: mapping.mailboxEmail,
     telegramChatId: mapping.telegramChatId,
     telegramGroupName: mapping.telegramGroupName,
+    telegramThreadId: mapping.telegramThreadId,
+    telegramTopicName: mapping.telegramTopicName,
     status: mapping.status,
     createdAt: mapping.createdAt.toISOString(),
     updatedAt: mapping.updatedAt.toISOString(),

@@ -49,10 +49,13 @@ function makeDeps(overrides: Partial<EmailProcessingDependencies> = {}): {
     chatId: CHAT_ID,
     messageId: 1,
   }));
-  const resolveSpy = vi.fn(async () => CHAT_ID);
+  const resolveSpy = vi.fn(async () => ({
+    chatId: CHAT_ID,
+    threadId: null,
+  }));
   const deps: EmailProcessingDependencies = {
     store,
-    resolveTelegramChatId: resolveSpy,
+    resolveTelegramDestination: resolveSpy,
     sendTelegramMessage: sendSpy,
     ...overrides,
   };
@@ -76,8 +79,13 @@ describe('processMockEmail', () => {
     expect(resolveSpy).toHaveBeenCalledWith(MAILBOX_ID);
 
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    const sentArg = sendSpy.mock.calls[0][0] as { chatId: string; text: string };
+    const sentArg = sendSpy.mock.calls[0][0] as {
+      chatId: string;
+      text: string;
+      messageThreadId?: string;
+    };
     expect(sentArg.chatId).toBe(CHAT_ID);
+    expect(sentArg.messageThreadId).toBeUndefined();
     expect(sentArg.text).toContain(MAILBOX_EMAIL);
     // The full code goes to Telegram on purpose, but never to the result.
     expect(sentArg.text).toContain(CODE);
@@ -88,6 +96,26 @@ describe('processMockEmail', () => {
 
     // Result envelope must not leak the plaintext code.
     expect(JSON.stringify(result)).not.toContain(CODE);
+  });
+
+  it('Case 1b: forwards message_thread_id to the sender when the mapping has a topic', async () => {
+    const { deps, sendSpy, resolveSpy } = makeDeps({
+      resolveTelegramDestination: vi.fn(async () => ({
+        chatId: CHAT_ID,
+        threadId: '42',
+      })),
+    });
+
+    const result = await processMockEmail(fbVerificationInput(), deps);
+
+    expect(result.status).toBe('SENT');
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const sentArg = sendSpy.mock.calls[0][0] as {
+      chatId: string;
+      messageThreadId?: string;
+    };
+    expect(sentArg.chatId).toBe(CHAT_ID);
+    expect(sentArg.messageThreadId).toBe('42');
   });
 
   it('Case 2: skips when the email is not a Facebook/Meta verification', async () => {
@@ -148,7 +176,7 @@ describe('processMockEmail', () => {
 
   it('Case 5: skips when no Telegram mapping resolves and does not mark sent', async () => {
     const resolveSpy = vi.fn(async () => null);
-    const { deps, sendSpy } = makeDeps({ resolveTelegramChatId: resolveSpy });
+    const { deps, sendSpy } = makeDeps({ resolveTelegramDestination: resolveSpy });
 
     const result = await processMockEmail(fbVerificationInput(), deps);
 
@@ -185,18 +213,22 @@ describe('processMockEmail', () => {
     expect(stored?.sentToTelegramAt).toBeNull();
   });
 
-  it('uses an explicit telegramChatId from the input and skips the mapping resolver', async () => {
+  it('uses an explicit telegramChatId and telegramThreadId from the input and skips the mapping resolver', async () => {
     const { deps, sendSpy, resolveSpy } = makeDeps();
 
     const result = await processMockEmail(
-      fbVerificationInput({ telegramChatId: '-100777' }),
+      fbVerificationInput({ telegramChatId: '-100777', telegramThreadId: '88' }),
       deps,
     );
 
     expect(result.status).toBe('SENT');
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    const sentArg = sendSpy.mock.calls[0][0] as { chatId: string };
+    const sentArg = sendSpy.mock.calls[0][0] as {
+      chatId: string;
+      messageThreadId?: string;
+    };
     expect(sentArg.chatId).toBe('-100777');
+    expect(sentArg.messageThreadId).toBe('88');
     expect(resolveSpy).not.toHaveBeenCalled();
   });
 

@@ -174,6 +174,7 @@ export function createPrismaTelegramMappingPort(): TelegramMappingPort {
       return {
         telegramChatId: mapping.telegramChatId,
         telegramGroupName: mapping.telegramGroupName,
+        telegramThreadId: mapping.telegramThreadId,
       };
     },
   };

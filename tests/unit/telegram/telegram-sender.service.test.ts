@@ -84,6 +84,52 @@ describe('sendTelegramMessage — success', () => {
   });
 });
 
+describe('sendTelegramMessage — forum topic (message_thread_id)', () => {
+  it('includes message_thread_id when a topic id is provided', async () => {
+    const fetchMock = stubFetchOk();
+
+    await sendTelegramMessage({
+      chatId: '-1001234567890',
+      text: 'hello',
+      messageThreadId: '42',
+    });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      chat_id: '-1001234567890',
+      text: 'hello',
+      message_thread_id: 42,
+    });
+  });
+
+  it('omits message_thread_id entirely when no topic is provided', async () => {
+    const fetchMock = stubFetchOk();
+
+    await sendTelegramMessage({ chatId: '-100', text: 'hi' });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(init.body as string);
+    expect(body).not.toHaveProperty('message_thread_id');
+  });
+
+  it('treats a blank topic id as no topic', async () => {
+    const fetchMock = stubFetchOk();
+
+    await sendTelegramMessage({ chatId: '-100', text: 'hi', messageThreadId: '   ' });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).not.toHaveProperty('message_thread_id');
+  });
+
+  it('rejects a non-numeric topic id without calling fetch', async () => {
+    const fetchMock = stubFetchOk();
+    await expect(
+      sendTelegramMessage({ chatId: '-100', text: 'hi', messageThreadId: 'general' }),
+    ).rejects.toMatchObject({ kind: 'validation', field: 'messageThreadId' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendTelegramMessage — validation', () => {
   it('rejects missing chatId without calling fetch', async () => {
     const fetchMock = stubFetchOk();

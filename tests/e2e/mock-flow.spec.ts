@@ -127,10 +127,13 @@ function makeDeps(overrides: Partial<EmailProcessingDependencies> = {}): {
     chatId: MOCK_CHAT_ID,
     messageId: 1,
   }));
-  const resolveSpy = vi.fn(async () => MOCK_CHAT_ID);
+  const resolveSpy = vi.fn(async () => ({
+    chatId: MOCK_CHAT_ID,
+    threadId: null,
+  }));
   const deps: EmailProcessingDependencies = {
     store,
-    resolveTelegramChatId: resolveSpy,
+    resolveTelegramDestination: resolveSpy,
     sendTelegramMessage: sendSpy,
     ...overrides,
   };
@@ -198,8 +201,13 @@ describe('mock flow (E2E): mock email → detect → extract → dedupe → Tele
     expect(resolveSpy).toHaveBeenCalledTimes(1);
     expect(resolveSpy).toHaveBeenCalledWith(fbFixture.mailboxId);
     expect(sendSpy).toHaveBeenCalledTimes(1);
-    const sent = sendSpy.mock.calls[0][0] as { chatId: string; text: string };
+    const sent = sendSpy.mock.calls[0][0] as {
+      chatId: string;
+      text: string;
+      messageThreadId?: string;
+    };
     expect(sent.chatId).toBe(MOCK_CHAT_ID);
+    expect(sent.messageThreadId).toBeUndefined();
     expect(sent.text).toContain(fbFixture.mailboxEmail);
     // The full code is delivered to the Telegram group on purpose (product goal).
     expect(sent.text).toContain(FB_CODE);

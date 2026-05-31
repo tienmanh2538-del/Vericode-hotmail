@@ -16,6 +16,8 @@ export interface TelegramMappingRecord {
   customerName: string | null;
   telegramChatId: string;
   telegramGroupName: string | null;
+  telegramThreadId: string | null;
+  telegramTopicName: string | null;
   status: TelegramMappingStatus;
   createdAt: Date;
   updatedAt: Date;
@@ -46,6 +48,8 @@ interface MappingRow {
   mailboxId: string;
   telegramChatId: string;
   telegramGroupName: string | null;
+  telegramThreadId: string | null;
+  telegramTopicName: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -65,6 +69,8 @@ function toRecord(row: MappingRow): TelegramMappingRecord {
     customerName: row.mailbox?.customer?.name ?? null,
     telegramChatId: row.telegramChatId,
     telegramGroupName: row.telegramGroupName,
+    telegramThreadId: row.telegramThreadId ?? null,
+    telegramTopicName: row.telegramTopicName ?? null,
     status: row.status as TelegramMappingStatus,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -151,6 +157,8 @@ export async function createTelegramMapping(
       mailboxId: input.mailboxId,
       telegramChatId: input.telegramChatId,
       telegramGroupName: input.telegramGroupName,
+      telegramThreadId: input.telegramThreadId,
+      telegramTopicName: input.telegramTopicName,
       status: input.status,
     },
     include: INCLUDE_MAILBOX,
@@ -180,6 +188,8 @@ export async function updateTelegramMapping(
       mailboxId: input.mailboxId,
       telegramChatId: input.telegramChatId,
       telegramGroupName: input.telegramGroupName,
+      telegramThreadId: input.telegramThreadId,
+      telegramTopicName: input.telegramTopicName,
       status: input.status,
     },
     include: INCLUDE_MAILBOX,

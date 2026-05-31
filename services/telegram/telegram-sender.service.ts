@@ -10,6 +10,12 @@ export type TelegramParseMode = 'HTML' | 'MarkdownV2';
 export interface SendTelegramMessageInput {
   chatId: string;
   text: string;
+  /**
+   * TASK-041 — optional Telegram forum topic. When set, it is sent as
+   * `message_thread_id` so the message lands in a specific topic inside the
+   * group. Omit it (or pass undefined) for plain group delivery.
+   */
+  messageThreadId?: string;
   parseMode?: TelegramParseMode;
   disableNotification?: boolean;
 }
@@ -28,7 +34,7 @@ export type TelegramErrorKind =
 
 export class TelegramSendError extends Error {
   readonly kind: TelegramErrorKind;
-  readonly field?: 'chatId' | 'text';
+  readonly field?: 'chatId' | 'text' | 'messageThreadId';
   readonly telegramDescription?: string;
   /**
    * HTTP status returned by the Telegram Bot API (only set for `telegram_api`
@@ -47,7 +53,7 @@ export class TelegramSendError extends Error {
     kind: TelegramErrorKind,
     message: string,
     options?: {
-      field?: 'chatId' | 'text';
+      field?: 'chatId' | 'text' | 'messageThreadId';
       telegramDescription?: string;
       statusCode?: number;
       retryAfterSeconds?: number;
@@ -78,7 +84,14 @@ function readRetryAfterSeconds(payload: unknown): number | undefined {
     : undefined;
 }
 
-function validate(input: SendTelegramMessageInput): { chatId: string; text: string } {
+// Telegram forum topic id (`message_thread_id`) is a positive integer.
+const THREAD_ID_PATTERN = /^[1-9][0-9]*$/;
+
+function validate(input: SendTelegramMessageInput): {
+  chatId: string;
+  text: string;
+  messageThreadId?: number;
+} {
   if (typeof input.chatId !== 'string') {
     throw new TelegramSendError('validation', 'chatId is required', { field: 'chatId' });
   }
@@ -102,7 +115,28 @@ function validate(input: SendTelegramMessageInput): { chatId: string; text: stri
     );
   }
 
-  return { chatId, text };
+  // Optional forum topic. Undefined/empty → plain group delivery (unchanged).
+  let messageThreadId: number | undefined;
+  if (input.messageThreadId !== undefined && input.messageThreadId !== null) {
+    if (typeof input.messageThreadId !== 'string') {
+      throw new TelegramSendError('validation', 'messageThreadId is invalid', {
+        field: 'messageThreadId',
+      });
+    }
+    const trimmed = input.messageThreadId.trim();
+    if (trimmed.length > 0) {
+      if (!THREAD_ID_PATTERN.test(trimmed)) {
+        throw new TelegramSendError(
+          'validation',
+          'messageThreadId must be a positive integer',
+          { field: 'messageThreadId' },
+        );
+      }
+      messageThreadId = Number(trimmed);
+    }
+  }
+
+  return { chatId, text, messageThreadId };
 }
 
 function isTelegramApiResponse(value: unknown): value is TelegramApiResponse {
@@ -112,7 +146,7 @@ function isTelegramApiResponse(value: unknown): value is TelegramApiResponse {
 export async function sendTelegramMessage(
   input: SendTelegramMessageInput,
 ): Promise<SendTelegramMessageResult> {
-  const { chatId, text } = validate(input);
+  const { chatId, text, messageThreadId } = validate(input);
 
   let botToken: string;
   try {
@@ -123,6 +157,7 @@ export async function sendTelegramMessage(
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const body: Record<string, unknown> = { chat_id: chatId, text };
+  if (messageThreadId !== undefined) body.message_thread_id = messageThreadId;
   if (input.parseMode) body.parse_mode = input.parseMode;
   if (input.disableNotification) body.disable_notification = true;
 

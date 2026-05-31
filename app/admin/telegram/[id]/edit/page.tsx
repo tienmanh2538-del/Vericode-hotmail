@@ -76,6 +76,8 @@ export default async function EditTelegramMappingPage({
           mailboxId: mapping.mailboxId,
           telegramChatId: mapping.telegramChatId,
           telegramGroupName: mapping.telegramGroupName ?? "",
+          telegramThreadId: mapping.telegramThreadId ?? "",
+          telegramTopicName: mapping.telegramTopicName ?? "",
           status: mapping.status,
         }}
         submitLabel="Save changes"

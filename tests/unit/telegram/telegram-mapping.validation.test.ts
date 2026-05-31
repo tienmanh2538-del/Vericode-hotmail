@@ -20,6 +20,8 @@ describe('validateTelegramMappingInput — success', () => {
         mailboxId: 'mb_1',
         telegramChatId: '-1001234567890',
         telegramGroupName: 'Client A verification',
+        telegramThreadId: null,
+        telegramTopicName: null,
         status: 'ACTIVE',
       });
     }
@@ -63,6 +65,32 @@ describe('validateTelegramMappingInput — success', () => {
       telegramChatId: '@my_channel',
     });
     expect(result.ok).toBe(true);
+  });
+
+  it('accepts an optional numeric topic id and topic name', () => {
+    const result = validateTelegramMappingInput({
+      ...VALID_INPUT,
+      telegramThreadId: '42',
+      telegramTopicName: 'Client A topic',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.telegramThreadId).toBe('42');
+      expect(result.data.telegramTopicName).toBe('Client A topic');
+    }
+  });
+
+  it('normalises blank topic fields to null (plain group routing)', () => {
+    const result = validateTelegramMappingInput({
+      ...VALID_INPUT,
+      telegramThreadId: '   ',
+      telegramTopicName: '',
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.telegramThreadId).toBeNull();
+      expect(result.data.telegramTopicName).toBeNull();
+    }
   });
 });
 
@@ -119,6 +147,33 @@ describe('validateTelegramMappingInput — failure', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.telegramGroupName).toBeTruthy();
+  });
+
+  it('rejects a non-numeric topic id', () => {
+    const result = validateTelegramMappingInput({
+      ...VALID_INPUT,
+      telegramThreadId: 'general',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.telegramThreadId).toBeTruthy();
+  });
+
+  it('rejects a topic id of zero', () => {
+    const result = validateTelegramMappingInput({
+      ...VALID_INPUT,
+      telegramThreadId: '0',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.telegramThreadId).toBeTruthy();
+  });
+
+  it('rejects a topic name that leaks a secret', () => {
+    const result = validateTelegramMappingInput({
+      ...VALID_INPUT,
+      telegramTopicName: 'bot token here',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors.telegramTopicName).toBeTruthy();
   });
 
   it('rejects unknown status', () => {

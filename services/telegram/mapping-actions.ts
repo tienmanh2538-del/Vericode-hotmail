@@ -18,6 +18,8 @@ function readForm(formData: FormData) {
     mailboxId: (formData.get('mailboxId') ?? '').toString(),
     telegramChatId: (formData.get('telegramChatId') ?? '').toString(),
     telegramGroupName: (formData.get('telegramGroupName') ?? '').toString(),
+    telegramThreadId: (formData.get('telegramThreadId') ?? '').toString(),
+    telegramTopicName: (formData.get('telegramTopicName') ?? '').toString(),
     status: (formData.get('status') ?? '').toString(),
   };
 }

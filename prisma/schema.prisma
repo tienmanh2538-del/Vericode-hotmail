@@ -131,13 +131,27 @@ model TelegramMapping {
   mailbox           Mailbox               @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
   telegramChatId    String
   telegramGroupName String?
+  // TASK-041 — optional Telegram forum topic routing. When set, the sender
+  // passes `message_thread_id` so the code lands in a specific topic inside the
+  // group. `telegramThreadId` is the numeric topic/thread id; `telegramTopicName`
+  // is a human label only. Both are optional so plain group routing is unchanged.
+  // Many mailboxes may share the same telegramChatId (+ telegramThreadId): there
+  // is deliberately NO unique constraint on those columns.
+  telegramThreadId  String?
+  telegramTopicName String?
   status            TelegramMappingStatus @default(ACTIVE)
   createdById       String?
   createdBy         User?                 @relation("TelegramMappingCreatedBy", fields: [createdById], references: [id])
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
+  // Keeps a single mailbox from holding duplicate rows to the SAME chat. It does
+  // NOT (and must not) prevent different mailboxes from sharing a chat id — that
+  // is the whole point of TASK-041. "One active destination per mailbox" is
+  // enforced in the service layer, not by a DB unique.
   @@unique([mailboxId, telegramChatId])
+  // Speeds up "how many mailboxes route to this destination" lookups for the UI.
+  @@index([telegramChatId])
   @@index([status])
 }
 

@@ -46,6 +46,8 @@ const FIXTURE_ROW = {
   mailboxId: 'mb_1',
   telegramChatId: '-1001234567890',
   telegramGroupName: 'Client A',
+  telegramThreadId: null,
+  telegramTopicName: null,
   status: 'ACTIVE',
   createdAt: new Date('2026-01-01T00:00:00.000Z'),
   updatedAt: new Date('2026-01-02T00:00:00.000Z'),
@@ -80,6 +82,8 @@ describe('listTelegramMappings', () => {
       customerName: 'Client A',
       telegramChatId: '-1001234567890',
       telegramGroupName: 'Client A',
+      telegramThreadId: null,
+      telegramTopicName: null,
       status: 'ACTIVE',
       createdAt: FIXTURE_ROW.createdAt,
       updatedAt: FIXTURE_ROW.updatedAt,
@@ -164,11 +168,73 @@ describe('createTelegramMapping', () => {
           mailboxId: 'mb_1',
           telegramChatId: '-1001234567890',
           telegramGroupName: 'New Group',
+          telegramThreadId: null,
+          telegramTopicName: null,
           status: 'ACTIVE',
         },
       }),
     );
     expect(result.telegramGroupName).toBe('New Group');
+  });
+
+  it('allows two different mailboxes to share the same chat id', async () => {
+    // No (mailbox, chatId) duplicate and no other ACTIVE mapping for THIS
+    // mailbox → the shared chat id must be accepted (TASK-041).
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      id: 'tm_2',
+      mailboxId: 'mb_2',
+    });
+
+    await createTelegramMapping({
+      mailboxId: 'mb_2',
+      telegramChatId: '-1001234567890',
+      telegramGroupName: 'Client A',
+      status: 'ACTIVE',
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mailboxId: 'mb_2',
+          telegramChatId: '-1001234567890',
+        }),
+      }),
+    );
+  });
+
+  it('allows two different mailboxes to share the same chat id AND topic', async () => {
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      id: 'tm_3',
+      mailboxId: 'mb_3',
+      telegramThreadId: '42',
+      telegramTopicName: 'Shared topic',
+    });
+
+    const result = await createTelegramMapping({
+      mailboxId: 'mb_3',
+      telegramChatId: '-1001234567890',
+      telegramGroupName: 'Client A',
+      telegramThreadId: '42',
+      telegramTopicName: 'Shared topic',
+      status: 'ACTIVE',
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mailboxId: 'mb_3',
+          telegramChatId: '-1001234567890',
+          telegramThreadId: '42',
+          telegramTopicName: 'Shared topic',
+        }),
+      }),
+    );
+    expect(result.telegramThreadId).toBe('42');
+    expect(result.telegramTopicName).toBe('Shared topic');
   });
 });
 
@@ -200,6 +266,8 @@ describe('updateTelegramMapping', () => {
           mailboxId: 'mb_1',
           telegramChatId: '-1001234567890',
           telegramGroupName: 'Client A',
+          telegramThreadId: null,
+          telegramTopicName: null,
           status: 'DISABLED',
         },
       }),

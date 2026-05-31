@@ -8,6 +8,8 @@ export interface TelegramMappingFormState {
     mailboxId: string;
     telegramChatId: string;
     telegramGroupName: string;
+    telegramThreadId: string;
+    telegramTopicName: string;
     status: string;
   };
 }
@@ -18,6 +20,8 @@ export const INITIAL_TELEGRAM_MAPPING_FORM_STATE: TelegramMappingFormState = {
     mailboxId: '',
     telegramChatId: '',
     telegramGroupName: '',
+    telegramThreadId: '',
+    telegramTopicName: '',
     status: 'ACTIVE',
   },
 };

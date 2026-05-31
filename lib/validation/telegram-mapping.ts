@@ -5,6 +5,10 @@ export interface TelegramMappingInput {
   mailboxId: string;
   telegramChatId: string;
   telegramGroupName: string;
+  // TASK-041 — optional forum-topic routing. `null` (not undefined) means "no
+  // topic", which keeps the persisted/serialised shape stable and explicit.
+  telegramThreadId: string | null;
+  telegramTopicName: string | null;
   status: TelegramMappingStatus;
 }
 
@@ -12,6 +16,8 @@ export interface RawTelegramMappingInput {
   mailboxId?: unknown;
   telegramChatId?: unknown;
   telegramGroupName?: unknown;
+  telegramThreadId?: unknown;
+  telegramTopicName?: unknown;
   status?: unknown;
 }
 
@@ -25,7 +31,11 @@ export type TelegramMappingValidationResult =
 
 const CHAT_ID_MAX = 64;
 const GROUP_NAME_MAX = 200;
+const TOPIC_NAME_MAX = 200;
+const THREAD_ID_MAX = 32;
 const CHAT_ID_PATTERN = /^-?[0-9]+$|^@[A-Za-z0-9_]{4,}$/;
+// Telegram forum topic / message_thread_id is a positive integer (a message id).
+const THREAD_ID_PATTERN = /^[1-9][0-9]*$/;
 // Bot tokens look like "123456:AAA..." — reject them so they never end up
 // stored as a chat ID through a copy/paste mistake.
 const BOT_TOKEN_LIKE = /\d+:[A-Za-z0-9_-]{10,}/;
@@ -73,6 +83,37 @@ export function validateTelegramMappingInput(
     errors.telegramGroupName = 'Telegram group name must not contain secrets or tokens.';
   }
 
+  // Optional forum-topic thread id. Empty/undefined → null (plain group send).
+  let threadId: string | null = null;
+  const rawThreadId = asString(raw.telegramThreadId)?.trim() ?? '';
+  if (rawThreadId.length > 0) {
+    if (rawThreadId.length > THREAD_ID_MAX) {
+      errors.telegramThreadId = `Telegram topic ID must be ${THREAD_ID_MAX} characters or fewer.`;
+    } else if (!THREAD_ID_PATTERN.test(rawThreadId)) {
+      errors.telegramThreadId =
+        'Telegram topic ID must be a positive number (the topic/thread message id).';
+    } else {
+      threadId = rawThreadId;
+    }
+  }
+
+  // Optional human-readable topic label. Display only — it never routes.
+  let topicName: string | null = null;
+  const rawTopicName = asString(raw.telegramTopicName)?.trim() ?? '';
+  if (rawTopicName.length > 0) {
+    if (rawTopicName.length > TOPIC_NAME_MAX) {
+      errors.telegramTopicName = `Telegram topic name must be ${TOPIC_NAME_MAX} characters or fewer.`;
+    } else if (
+      BOT_TOKEN_LIKE.test(rawTopicName) ||
+      SUSPICIOUS_GROUP_NAME.test(rawTopicName)
+    ) {
+      errors.telegramTopicName =
+        'Telegram topic name must not contain secrets or tokens.';
+    } else {
+      topicName = rawTopicName;
+    }
+  }
+
   let status: TelegramMappingStatus = 'ACTIVE';
   if (raw.status === undefined || raw.status === '' || raw.status === null) {
     status = 'ACTIVE';
@@ -92,6 +133,8 @@ export function validateTelegramMappingInput(
       mailboxId,
       telegramChatId: chatId,
       telegramGroupName: groupName,
+      telegramThreadId: threadId,
+      telegramTopicName: topicName,
       status,
     },
   };

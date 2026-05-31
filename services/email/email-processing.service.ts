@@ -28,6 +28,7 @@ export type ProcessMockEmailInput = {
   bodyPreview?: string;
   receivedAt: string | Date;
   telegramChatId?: string;
+  telegramThreadId?: string;
 };
 
 export type EmailProcessingPlatform = 'facebook_meta' | 'unknown';
@@ -53,9 +54,18 @@ export interface EmailProcessingResult {
   reason?: string;
 }
 
+export interface TelegramDestination {
+  chatId: string;
+  threadId?: string | null;
+}
+
 export interface EmailProcessingDependencies {
   store: ProcessedMessageStore;
-  resolveTelegramChatId: (mailboxKey: string) => Promise<string | null>;
+  /** @deprecated use resolveTelegramDestination */
+  resolveTelegramChatId?: (mailboxKey: string) => Promise<string | null>;
+  resolveTelegramDestination: (
+    mailboxKey: string,
+  ) => Promise<TelegramDestination | null>;
   sendTelegramMessage: (
     input: SendTelegramMessageInput,
   ) => Promise<SendTelegramMessageResult>;
@@ -235,14 +245,21 @@ export async function processMockEmail(
     let chatId: string | null = isNonEmptyString(input.telegramChatId)
       ? input.telegramChatId.trim()
       : null;
+    let threadId: string | null = isNonEmptyString(input.telegramThreadId)
+      ? input.telegramThreadId.trim()
+      : null;
+
     if (!chatId) {
       const lookupKey = isNonEmptyString(input.mailboxId)
         ? input.mailboxId.trim()
         : mailboxEmail;
       try {
-        chatId = await deps.resolveTelegramChatId(lookupKey);
+        const destination = await deps.resolveTelegramDestination(lookupKey);
+        chatId = destination?.chatId ?? null;
+        threadId = destination?.threadId ?? null;
       } catch {
         chatId = null;
+        threadId = null;
       }
     }
 
@@ -272,7 +289,11 @@ export async function processMockEmail(
     });
 
     try {
-      await deps.sendTelegramMessage({ chatId, text });
+      await deps.sendTelegramMessage({
+        chatId,
+        text,
+        messageThreadId: threadId ?? undefined,
+      });
     } catch (err: unknown) {
       const reason =
         err instanceof TelegramSendError ? err.kind : 'unknown';
@@ -339,14 +360,18 @@ export function createDefaultEmailProcessingDependencies(
 ): EmailProcessingDependencies {
   return {
     store,
-    resolveTelegramChatId: async (key) => {
+    resolveTelegramDestination: async (key) => {
       // Imported lazily so unit tests that only import processMockEmail do
       // not pull in Prisma at module load time.
       const { findActiveMappingForMailbox } = await import(
         '@/services/telegram/telegram-mapping.service'
       );
       const mapping = await findActiveMappingForMailbox(key);
-      return mapping?.telegramChatId ?? null;
+      if (!mapping) return null;
+      return {
+        chatId: mapping.telegramChatId,
+        threadId: mapping.telegramThreadId,
+      };
     },
     sendTelegramMessage,
   };

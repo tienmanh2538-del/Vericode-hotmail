@@ -24,6 +24,8 @@ interface TelegramMappingFormProps {
     mailboxId?: string;
     telegramChatId?: string;
     telegramGroupName?: string;
+    telegramThreadId?: string;
+    telegramTopicName?: string;
     status?: string;
   };
   submitLabel?: string;
@@ -51,6 +53,8 @@ export function TelegramMappingForm({
           mailboxId: initialValues.mailboxId ?? "",
           telegramChatId: initialValues.telegramChatId ?? "",
           telegramGroupName: initialValues.telegramGroupName ?? "",
+          telegramThreadId: initialValues.telegramThreadId ?? "",
+          telegramTopicName: initialValues.telegramTopicName ?? "",
           status: initialValues.status ?? "ACTIVE",
         },
       }
@@ -160,6 +164,64 @@ export function TelegramMappingForm({
         {errors.telegramChatId && (
           <p id="mapping-chat-id-error" className="customer-form__error">
             {errors.telegramChatId}
+          </p>
+        )}
+      </div>
+
+      <div className="customer-form__field">
+        <label htmlFor="mapping-topic-name" className="customer-form__label">
+          Telegram topic name <span className="telegram-form__optional">(optional)</span>
+        </label>
+        <input
+          id="mapping-topic-name"
+          name="telegramTopicName"
+          type="text"
+          defaultValue={state.values.telegramTopicName}
+          placeholder="Client A — verification topic"
+          aria-invalid={errors.telegramTopicName ? "true" : undefined}
+          aria-describedby={
+            errors.telegramTopicName ? "mapping-topic-name-error" : undefined
+          }
+          className="customer-form__input"
+          maxLength={200}
+        />
+        {errors.telegramTopicName && (
+          <p id="mapping-topic-name-error" className="customer-form__error">
+            {errors.telegramTopicName}
+          </p>
+        )}
+      </div>
+
+      <div className="customer-form__field">
+        <label htmlFor="mapping-thread-id" className="customer-form__label">
+          Telegram topic ID <span className="telegram-form__optional">(optional)</span>
+        </label>
+        <input
+          id="mapping-thread-id"
+          name="telegramThreadId"
+          type="text"
+          inputMode="numeric"
+          defaultValue={state.values.telegramThreadId}
+          placeholder="e.g. 42"
+          aria-invalid={errors.telegramThreadId ? "true" : undefined}
+          aria-describedby={
+            errors.telegramThreadId
+              ? "mapping-thread-id-error"
+              : "mapping-thread-id-hint"
+          }
+          className="customer-form__input"
+          maxLength={32}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <p id="mapping-thread-id-hint" className="telegram-form__hint">
+          Leave blank to deliver to the main group. Set the topic (thread) ID to
+          route into a specific forum topic. Many mailboxes may share the same
+          group and topic.
+        </p>
+        {errors.telegramThreadId && (
+          <p id="mapping-thread-id-error" className="customer-form__error">
+            {errors.telegramThreadId}
           </p>
         )}
       </div>
