@@ -1,7 +1,7 @@
 # TASK-042 Report — Internal Production Readiness Plan
 
 - **Report date:** 2026-06-01
-- **Branch:** `feature/task-041-flexible-telegram-routing`
+- **Git context used for review:** `feature/task-041-flexible-telegram-routing`
 - **Base commit:** `7cf5253`
 - **Author:** Claude Code
 - **Scope:** Planning / documentation only. **No runtime code, tests, configs, Prisma
