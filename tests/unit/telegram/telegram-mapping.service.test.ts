@@ -94,6 +94,16 @@ describe('listTelegramMappings', () => {
     findMany.mockResolvedValue([]);
     expect(await listTelegramMappings()).toEqual([]);
   });
+
+  it('constrains to assigned customers for the STAFF scope', async () => {
+    findMany.mockResolvedValue([FIXTURE_ROW]);
+    await listTelegramMappings({ kind: 'assigned', customerIds: ['cu_1'] });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { mailbox: { customerId: { in: ['cu_1'] } } },
+      }),
+    );
+  });
 });
 
 describe('getTelegramMappingById', () => {
@@ -108,6 +118,24 @@ describe('getTelegramMappingById', () => {
     const result = await getTelegramMappingById('tm_1');
     expect(result?.id).toBe('tm_1');
     expect(result?.mailboxEmail).toBe('client-a@hotmail.com');
+  });
+
+  it('returns the record when the STAFF scope includes the mapping customer', async () => {
+    findUnique.mockResolvedValue(FIXTURE_ROW);
+    const result = await getTelegramMappingById('tm_1', {
+      kind: 'assigned',
+      customerIds: ['cu_1'],
+    });
+    expect(result?.id).toBe('tm_1');
+  });
+
+  it('returns null when the STAFF scope excludes the mapping customer', async () => {
+    findUnique.mockResolvedValue(FIXTURE_ROW);
+    const result = await getTelegramMappingById('tm_1', {
+      kind: 'assigned',
+      customerIds: ['cu_other'],
+    });
+    expect(result).toBeNull();
   });
 });
 

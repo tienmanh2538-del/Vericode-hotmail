@@ -1,5 +1,7 @@
 import { ConnectMailboxButton } from '@/components/admin/ConnectMailboxButton';
 import { MailboxListTable } from '@/components/tables/MailboxListTable';
+import { resolveCustomerScope, type CustomerScope } from '@/lib/auth/access-scope';
+import { requireAdminAccess } from '@/lib/auth/guards';
 import { createLogger } from '@/lib/logger';
 import {
   listMailboxesForAdmin,
@@ -15,9 +17,9 @@ type LoadResult =
   | { ok: true; mailboxes: MailboxListItem[] }
   | { ok: false };
 
-async function loadMailboxes(): Promise<LoadResult> {
+async function loadMailboxes(scope: CustomerScope): Promise<LoadResult> {
   try {
-    const mailboxes = await listMailboxesForAdmin();
+    const mailboxes = await listMailboxesForAdmin(scope);
     return { ok: true, mailboxes };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -29,7 +31,10 @@ async function loadMailboxes(): Promise<LoadResult> {
 }
 
 export default async function MailboxesListPage() {
-  const result = await loadMailboxes();
+  // TASK-045 — STAFF_READ_ONLY only sees mailboxes of assigned customers.
+  const user = await requireAdminAccess();
+  const scope = await resolveCustomerScope(user);
+  const result = await loadMailboxes(scope);
 
   return (
     <>

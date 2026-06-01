@@ -1,10 +1,24 @@
 import { NextResponse } from 'next/server';
+import { hasPermission } from '@/lib/auth/permissions';
+import { getCurrentUser } from '@/lib/auth/session';
 import {
   sendTelegramMessage,
   TelegramSendError,
 } from '@/services/telegram/telegram-sender.service';
 
 export const dynamic = 'force-dynamic';
+
+// TASK-045 — sending a test message is a Telegram management operation, so it
+// requires MANAGE_TELEGRAM_MAPPINGS (OWNER/ADMIN). STAFF_READ_ONLY, which holds
+// no MANAGE_* permission, is rejected. Mirrors the guard on the mappings POST
+// route: API callers get a JSON 403 rather than a redirect.
+async function requireMappingManager() {
+  const user = await getCurrentUser();
+  if (!user || !hasPermission(user.role, 'MANAGE_TELEGRAM_MAPPINGS')) {
+    return null;
+  }
+  return user;
+}
 
 const DEFAULT_TEST_MESSAGE = '✅ Verification Tool Telegram test message';
 
@@ -35,6 +49,11 @@ function readText(body: TestSendBody): string {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
+  const user = await requireMappingManager();
+  if (!user) {
+    return NextResponse.json({ ok: false, error: 'Forbidden' }, { status: 403 });
+  }
+
   let body: TestSendBody;
   try {
     body = (await request.json()) as TestSendBody;

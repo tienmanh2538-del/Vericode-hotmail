@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import { hasPermission } from '@/lib/auth/permissions';
 import { getCurrentUser } from '@/lib/auth/session';
 import {
@@ -24,7 +25,9 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
   }
 
-  const mappings = await listTelegramMappings();
+  // TASK-045 — staff only see mappings of assigned customers.
+  const scope = await resolveCustomerScope(user);
+  const mappings = await listTelegramMappings(scope);
   return NextResponse.json({
     ok: true,
     data: mappings.map((m) => ({

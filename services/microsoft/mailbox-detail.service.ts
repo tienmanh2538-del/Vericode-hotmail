@@ -1,4 +1,6 @@
 import { prisma } from '@/lib/prisma';
+import type { CustomerScope } from '@/lib/auth/access-scope';
+import { scopeAllowsCustomer } from '@/lib/auth/access-scope';
 import type {
   GraphSubscriptionStatusValue,
   MailboxProviderValue,
@@ -96,6 +98,7 @@ function truncateId(raw: string, head = 10): string {
 //   - ProcessedMessage.codeHash, subjectHash — never exposed
 export async function getMailboxDetailById(
   id: string,
+  scope?: CustomerScope,
 ): Promise<MailboxDetail | null> {
   if (!id) return null;
 
@@ -106,6 +109,9 @@ export async function getMailboxDetailById(
       emailAddress: true,
       provider: true,
       status: true,
+      // TASK-045 — selected only to enforce the staff scope guard below; it is
+      // never copied into the returned MailboxDetail.
+      customerId: true,
       ownerCustomerName: true,
       tokenLastRefreshedAt: true,
       lastSuccessfulSyncAt: true,
@@ -158,6 +164,11 @@ export async function getMailboxDetailById(
   });
 
   if (!row) return null;
+
+  // Fail closed: a staff viewer asking for a mailbox outside their assigned
+  // customers gets the same result as a missing mailbox (null → notFound), so
+  // existence of out-of-scope mailboxes is never revealed.
+  if (scope && !scopeAllowsCustomer(scope, row.customerId)) return null;
 
   return {
     mailbox: {

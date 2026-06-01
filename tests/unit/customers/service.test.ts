@@ -57,6 +57,21 @@ describe('listCustomers', () => {
     findMany.mockResolvedValue([]);
     expect(await listCustomers()).toEqual([]);
   });
+
+  it('does not filter for the unrestricted (OWNER/ADMIN) scope', async () => {
+    findMany.mockResolvedValue([FIXTURE_ROW]);
+    await listCustomers({ kind: 'all' });
+    expect(findMany).toHaveBeenCalledWith({ orderBy: { createdAt: 'desc' } });
+  });
+
+  it('constrains to assigned ids for the STAFF scope', async () => {
+    findMany.mockResolvedValue([FIXTURE_ROW]);
+    await listCustomers({ kind: 'assigned', customerIds: ['cus_1'] });
+    expect(findMany).toHaveBeenCalledWith({
+      orderBy: { createdAt: 'desc' },
+      where: { id: { in: ['cus_1'] } },
+    });
+  });
 });
 
 describe('getCustomerById', () => {
@@ -78,6 +93,24 @@ describe('getCustomerById', () => {
     const result = await getCustomerById('cus_1');
     expect(result?.id).toBe('cus_1');
     expect(result?.status).toBe('ACTIVE');
+  });
+
+  it('returns the record when the STAFF scope includes it', async () => {
+    findUnique.mockResolvedValue(FIXTURE_ROW);
+    const result = await getCustomerById('cus_1', {
+      kind: 'assigned',
+      customerIds: ['cus_1'],
+    });
+    expect(result?.id).toBe('cus_1');
+  });
+
+  it('returns null when the STAFF scope excludes the customer', async () => {
+    findUnique.mockResolvedValue(FIXTURE_ROW);
+    const result = await getCustomerById('cus_1', {
+      kind: 'assigned',
+      customerIds: ['cus_other'],
+    });
+    expect(result).toBeNull();
   });
 });
 

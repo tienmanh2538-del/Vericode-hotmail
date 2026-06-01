@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { CustomerForm } from "@/components/forms/CustomerForm";
+import { requirePermission } from "@/lib/auth/guards";
 import { createCustomerAction } from "@/services/customers/actions";
 import "../customers.css";
 
 export const dynamic = "force-dynamic";
 
-export default function NewCustomerPage() {
+export default async function NewCustomerPage() {
+  // TASK-045 — creating customers is a MANAGE_CUSTOMERS action; STAFF blocked.
+  await requirePermission("MANAGE_CUSTOMERS");
   return (
     <>
       <div className="customers-header">

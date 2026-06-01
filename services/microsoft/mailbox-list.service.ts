@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma';
+import type { CustomerScope } from '@/lib/auth/access-scope';
 
 export type MailboxStatusValue =
   | 'ACTIVE'
@@ -45,9 +46,16 @@ function maskChatId(raw: string | null | undefined): string | null {
 // Whitelisted projection. Mailbox.encryptedRefreshToken, microsoftUserId,
 // GraphSubscription.clientStateHash / subscriptionId / resource are NEVER
 // selected here so they cannot leak into UI props.
-export async function listMailboxesForAdmin(): Promise<MailboxListItem[]> {
+export async function listMailboxesForAdmin(
+  scope?: CustomerScope,
+): Promise<MailboxListItem[]> {
   const rows = await prisma.mailbox.findMany({
     orderBy: { createdAt: 'desc' },
+    // TASK-045 — STAFF only sees mailboxes whose customer is assigned to them.
+    // A mailbox with no customer is never in an 'assigned' scope.
+    ...(scope && scope.kind === 'assigned'
+      ? { where: { customerId: { in: scope.customerIds } } }
+      : {}),
     select: {
       id: true,
       emailAddress: true,

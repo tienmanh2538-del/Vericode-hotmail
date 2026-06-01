@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { requireAdminAccess } from '@/lib/auth/guards';
+import { requirePermission } from '@/lib/auth/guards';
 import { validateCustomerInput } from '@/lib/validation/customer';
 import {
   createCustomer,
@@ -22,7 +22,7 @@ export async function createCustomerAction(
   _prev: CustomerFormState,
   formData: FormData,
 ): Promise<CustomerFormState> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_CUSTOMERS');
   const raw = readForm(formData);
   const result = validateCustomerInput(raw);
 
@@ -49,7 +49,7 @@ export async function updateCustomerAction(
   _prev: CustomerFormState,
   formData: FormData,
 ): Promise<CustomerFormState> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_CUSTOMERS');
   const raw = readForm(formData);
   const result = validateCustomerInput(raw);
 

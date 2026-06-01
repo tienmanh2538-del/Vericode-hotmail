@@ -15,7 +15,7 @@ vi.mock('@/lib/auth/session', () => ({
   getCurrentUser: () => getCurrentUserMock(),
 }));
 
-import { requireAdminAccess } from '@/lib/auth/guards';
+import { requireAdminAccess, requirePermission } from '@/lib/auth/guards';
 
 beforeEach(() => {
   redirectMock.mockClear();
@@ -65,5 +65,65 @@ describe('requireAdminAccess', () => {
     const result = await requireAdminAccess();
     expect(result).toEqual(staff);
     expect(redirectMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('requirePermission', () => {
+  // TASK-045 — write surfaces gate on MANAGE_* so STAFF_READ_ONLY is blocked.
+  it('redirects STAFF_READ_ONLY away from a MANAGE_CUSTOMERS surface', async () => {
+    getCurrentUserMock.mockResolvedValue({
+      id: 'staff-1',
+      email: 'staff@example.com',
+      role: 'STAFF_READ_ONLY',
+    });
+
+    await expect(requirePermission('MANAGE_CUSTOMERS')).rejects.toThrow(
+      'REDIRECT:/login',
+    );
+    expect(redirectMock).toHaveBeenCalledWith('/login');
+  });
+
+  it('redirects STAFF_READ_ONLY away from a MANAGE_TELEGRAM_MAPPINGS surface', async () => {
+    getCurrentUserMock.mockResolvedValue({
+      id: 'staff-1',
+      email: 'staff@example.com',
+      role: 'STAFF_READ_ONLY',
+    });
+
+    await expect(
+      requirePermission('MANAGE_TELEGRAM_MAPPINGS'),
+    ).rejects.toThrow('REDIRECT:/login');
+  });
+
+  it('redirects when no user is signed in', async () => {
+    getCurrentUserMock.mockResolvedValue(null);
+    await expect(requirePermission('MANAGE_CUSTOMERS')).rejects.toThrow(
+      'REDIRECT:/login',
+    );
+  });
+
+  it('returns the user when an ADMIN holds the permission', async () => {
+    const admin: AuthUser = {
+      id: 'admin-1',
+      email: 'admin@example.com',
+      role: 'ADMIN',
+    };
+    getCurrentUserMock.mockResolvedValue(admin);
+
+    const result = await requirePermission('MANAGE_CUSTOMERS');
+    expect(result).toEqual(admin);
+    expect(redirectMock).not.toHaveBeenCalled();
+  });
+
+  it('returns the user when an OWNER holds MANAGE_STAFF_ASSIGNMENTS', async () => {
+    const owner: AuthUser = {
+      id: 'owner-1',
+      email: 'owner@example.com',
+      role: 'OWNER',
+    };
+    getCurrentUserMock.mockResolvedValue(owner);
+
+    const result = await requirePermission('MANAGE_STAFF_ASSIGNMENTS');
+    expect(result).toEqual(owner);
   });
 });

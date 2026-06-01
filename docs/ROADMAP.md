@@ -170,7 +170,7 @@ Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-0
 
 ## Sprint 11 — Staff operation model
 
-- TASK-045: Internal staff ownership & assignment model
+- TASK-045: Internal staff ownership & assignment model — done. Confirms this is an internal staff app: OWNER/ADMIN see everything; STAFF_READ_ONLY sees only customers assigned to them (and those customers' mailboxes/mappings). Customers never log in.
 - TASK-046: Staff dashboard UX for high mailbox volume
 - TASK-047: Safe mailbox onboarding flow
 

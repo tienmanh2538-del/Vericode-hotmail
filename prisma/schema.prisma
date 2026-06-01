@@ -78,6 +78,12 @@ model User {
   createdMailboxes        Mailbox[]         @relation("MailboxCreatedBy")
   createdTelegramMappings TelegramMapping[] @relation("TelegramMappingCreatedBy")
   auditLogs               AuditLog[]
+
+  // TASK-045 — internal staff ownership. A STAFF_READ_ONLY user only sees the
+  // customers (and their mailboxes) assigned to them here. OWNER/ADMIN ignore
+  // this relation entirely and see everything.
+  staffAssignments    StaffAssignment[] @relation("StaffAssignmentUser")
+  assignmentsRecorded StaffAssignment[] @relation("StaffAssignmentAssignedBy")
 }
 
 model Customer {
@@ -88,7 +94,9 @@ model Customer {
   createdAt DateTime       @default(now())
   updatedAt DateTime       @updatedAt
 
-  mailboxes Mailbox[]
+  mailboxes        Mailbox[]
+  // TASK-045 — staff assigned to operate this customer (and its mailboxes).
+  staffAssignments StaffAssignment[]
 }
 
 model Mailbox {
@@ -241,4 +249,32 @@ model CodeEvent {
   @@index([createdAt])
   @@index([status])
   @@index([mailboxEmail])
+}
+
+// TASK-045 — Internal staff ownership / assignment model.
+//
+// Join table linking a STAFF_READ_ONLY user to the customers they are allowed
+// to see and operate. Scope is customer-level on purpose: a mailbox inherits
+// its scope from `Mailbox.customerId`, so assigning a customer automatically
+// grants visibility to that customer's mailboxes (and their Telegram mappings).
+//
+// OWNER and ADMIN are NOT constrained by this table — the service layer treats
+// them as "see everything". This table only ever narrows STAFF visibility.
+//
+// `assignedById` records which OWNER/ADMIN created the assignment (nullable so
+// a deleted actor does not cascade-delete the assignment). It holds NO secrets.
+model StaffAssignment {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation("StaffAssignmentUser", fields: [userId], references: [id], onDelete: Cascade)
+  customerId   String
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedById String?
+  assignedBy   User?    @relation("StaffAssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+
+  // A staff user is assigned a given customer at most once.
+  @@unique([userId, customerId])
+  @@index([userId])
+  @@index([customerId])
 }

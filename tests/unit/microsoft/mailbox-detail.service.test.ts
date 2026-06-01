@@ -219,4 +219,55 @@ describe('getMailboxDetailById', () => {
     expect(message).not.toHaveProperty('codeHash');
     expect(message).not.toHaveProperty('subjectHash');
   });
+
+  // TASK-045 — staff scope guard.
+  it('returns the detail when the STAFF scope includes the mailbox customer', async () => {
+    findUnique.mockResolvedValue({
+      id: 'mbx_6',
+      emailAddress: 'scoped@hotmail.com',
+      provider: 'MICROSOFT',
+      status: 'ACTIVE',
+      customerId: 'cus_1',
+      ownerCustomerName: null,
+      tokenLastRefreshedAt: null,
+      lastSuccessfulSyncAt: null,
+      createdAt: CREATED,
+      updatedAt: UPDATED,
+      customer: { name: 'Acme Co' },
+      telegramMappings: [],
+      graphSubscriptions: [],
+      processedMessages: [],
+    });
+
+    const result = await getMailboxDetailById('mbx_6', {
+      kind: 'assigned',
+      customerIds: ['cus_1'],
+    });
+    expect(result?.mailbox.id).toBe('mbx_6');
+  });
+
+  it('returns null (notFound) when the STAFF scope excludes the mailbox customer', async () => {
+    findUnique.mockResolvedValue({
+      id: 'mbx_7',
+      emailAddress: 'out-of-scope@hotmail.com',
+      provider: 'MICROSOFT',
+      status: 'ACTIVE',
+      customerId: 'cus_other',
+      ownerCustomerName: null,
+      tokenLastRefreshedAt: null,
+      lastSuccessfulSyncAt: null,
+      createdAt: CREATED,
+      updatedAt: UPDATED,
+      customer: { name: 'Other Co' },
+      telegramMappings: [],
+      graphSubscriptions: [],
+      processedMessages: [],
+    });
+
+    const result = await getMailboxDetailById('mbx_7', {
+      kind: 'assigned',
+      customerIds: ['cus_1'],
+    });
+    expect(result).toBeNull();
+  });
 });

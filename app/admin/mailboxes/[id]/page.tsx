@@ -3,6 +3,8 @@ import { notFound } from 'next/navigation';
 import { MailboxStatusBadge } from '@/components/status/MailboxStatusBadge';
 import { SubscriptionStatusBadge } from '@/components/status/SubscriptionStatusBadge';
 import { TelegramMappingStatusBadge } from '@/components/status/TelegramMappingStatusBadge';
+import { resolveCustomerScope, type CustomerScope } from '@/lib/auth/access-scope';
+import { requireAdminAccess } from '@/lib/auth/guards';
 import { createLogger } from '@/lib/logger';
 import {
   getMailboxDetailById,
@@ -25,9 +27,9 @@ type LoadResult =
   | { ok: true; detail: MailboxDetail | null }
   | { ok: false };
 
-async function loadDetail(id: string): Promise<LoadResult> {
+async function loadDetail(id: string, scope: CustomerScope): Promise<LoadResult> {
   try {
-    const detail = await getMailboxDetailById(id);
+    const detail = await getMailboxDetailById(id, scope);
     return { ok: true, detail };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -63,7 +65,10 @@ const PROCESSED_STATUS_LABEL: Record<
 export default async function MailboxDetailPage({
   params,
 }: MailboxDetailPageProps) {
-  const result = await loadDetail(params.id);
+  // TASK-045 — staff outside the mailbox's customer scope get notFound().
+  const user = await requireAdminAccess();
+  const scope = await resolveCustomerScope(user);
+  const result = await loadDetail(params.id, scope);
 
   if (!result.ok) {
     return (

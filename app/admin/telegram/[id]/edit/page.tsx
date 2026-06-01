@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TelegramMappingForm } from "@/components/forms/TelegramMappingForm";
+import { requirePermission } from "@/lib/auth/guards";
 import { prisma } from "@/lib/prisma";
 import { updateTelegramMappingAction } from "@/services/telegram/mapping-actions";
 import type { TelegramMappingFormState } from "@/services/telegram/mapping-form-state";
@@ -40,6 +41,8 @@ async function listMailboxesForForm(extraMailboxId?: string | null) {
 export default async function EditTelegramMappingPage({
   params,
 }: EditMappingPageProps) {
+  // TASK-045 — editing mappings is a MANAGE_TELEGRAM_MAPPINGS action; STAFF blocked.
+  await requirePermission("MANAGE_TELEGRAM_MAPPINGS");
   const mapping = await getTelegramMappingById(params.id);
   if (!mapping) {
     notFound();

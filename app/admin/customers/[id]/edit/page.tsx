@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { CustomerForm } from "@/components/forms/CustomerForm";
+import { requirePermission } from "@/lib/auth/guards";
 import { updateCustomerAction } from "@/services/customers/actions";
 import type { CustomerFormState } from "@/services/customers/form-state";
 import { getCustomerById } from "@/services/customers/customer.service";
@@ -13,6 +14,8 @@ interface EditCustomerPageProps {
 }
 
 export default async function EditCustomerPage({ params }: EditCustomerPageProps) {
+  // TASK-045 — editing customers is a MANAGE_CUSTOMERS action; STAFF blocked.
+  await requirePermission("MANAGE_CUSTOMERS");
   const customer = await getCustomerById(params.id);
   if (!customer) {
     notFound();

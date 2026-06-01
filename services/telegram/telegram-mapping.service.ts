@@ -1,4 +1,6 @@
 import { prisma } from '@/lib/prisma';
+import type { CustomerScope } from '@/lib/auth/access-scope';
+import { scopeAllowsCustomer } from '@/lib/auth/access-scope';
 import {
   validateTelegramMappingInput,
   type RawTelegramMappingInput,
@@ -83,23 +85,37 @@ const INCLUDE_MAILBOX = {
   },
 } as const;
 
-export async function listTelegramMappings(): Promise<TelegramMappingRecord[]> {
+// TASK-045 — STAFF only sees mappings whose mailbox belongs to an assigned
+// customer. Mappings for mailboxes with no customer are never in scope. Scope
+// is omitted by worker/system callers, which keeps full (unscoped) behavior.
+export async function listTelegramMappings(
+  scope?: CustomerScope,
+): Promise<TelegramMappingRecord[]> {
   const rows = await prisma.telegramMapping.findMany({
     orderBy: { createdAt: 'desc' },
     include: INCLUDE_MAILBOX,
+    ...(scope && scope.kind === 'assigned'
+      ? { where: { mailbox: { customerId: { in: scope.customerIds } } } }
+      : {}),
   });
   return rows.map(toRecord);
 }
 
 export async function getTelegramMappingById(
   id: string,
+  scope?: CustomerScope,
 ): Promise<TelegramMappingRecord | null> {
   if (!id) return null;
   const row = await prisma.telegramMapping.findUnique({
     where: { id },
     include: INCLUDE_MAILBOX,
   });
-  return row ? toRecord(row) : null;
+  if (!row) return null;
+  // Fail closed: staff never receives a mapping outside their scope.
+  if (scope && !scopeAllowsCustomer(scope, row.mailbox?.customerId ?? null)) {
+    return null;
+  }
+  return toRecord(row);
 }
 
 async function assertNoConflict(

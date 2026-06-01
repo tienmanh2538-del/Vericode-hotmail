@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
-import { requireAdminAccess } from '@/lib/auth/guards';
+import { requirePermission } from '@/lib/auth/guards';
 import {
   createTelegramMapping,
   deleteTelegramMapping,
@@ -49,7 +49,7 @@ export async function createTelegramMappingAction(
   _prev: TelegramMappingFormState,
   formData: FormData,
 ): Promise<TelegramMappingFormState> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
   const values = readForm(formData);
 
   try {
@@ -67,7 +67,7 @@ export async function updateTelegramMappingAction(
   _prev: TelegramMappingFormState,
   formData: FormData,
 ): Promise<TelegramMappingFormState> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
   const values = readForm(formData);
 
   try {
@@ -82,13 +82,13 @@ export async function updateTelegramMappingAction(
 }
 
 export async function disableTelegramMappingAction(id: string): Promise<void> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
   await disableTelegramMapping(id);
   revalidatePath('/admin/telegram');
 }
 
 export async function deleteTelegramMappingAction(id: string): Promise<void> {
-  await requireAdminAccess();
+  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
   await deleteTelegramMapping(id);
   revalidatePath('/admin/telegram');
 }
