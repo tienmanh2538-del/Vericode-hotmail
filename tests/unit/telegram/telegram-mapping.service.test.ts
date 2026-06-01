@@ -274,6 +274,64 @@ describe('updateTelegramMapping', () => {
     );
     expect(result.status).toBe('DISABLED');
   });
+
+  it('changes the destination of the only active mapping in place (TASK-044)', async () => {
+    // TASK-044 scenario 7: editing a mailbox's destination keeps exactly one
+    // active mapping. The conflict checks exclude the row being edited, so the
+    // mapping can be re-pointed to a new chat id without tripping
+    // "already has an active mapping" against itself.
+    findFirst.mockResolvedValue(null);
+    update.mockResolvedValue({
+      ...FIXTURE_ROW,
+      telegramChatId: '-1007777777777',
+      telegramGroupName: 'Client A — new group',
+    });
+
+    const result = await updateTelegramMapping('tm_1', {
+      mailboxId: 'mb_1',
+      telegramChatId: '-1007777777777',
+      telegramGroupName: 'Client A — new group',
+      status: 'ACTIVE',
+    });
+
+    // Both pre-checks must exclude the edited row so it never conflicts with
+    // itself; the final state still has a single active destination.
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ NOT: { id: 'tm_1' } }),
+      }),
+    );
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'tm_1' },
+        data: expect.objectContaining({
+          telegramChatId: '-1007777777777',
+          status: 'ACTIVE',
+        }),
+      }),
+    );
+    expect(result.telegramChatId).toBe('-1007777777777');
+    expect(result.status).toBe('ACTIVE');
+  });
+
+  it('rejects activating a second mapping for a mailbox that already has one (TASK-044)', async () => {
+    // No same-(mailbox, chatId) duplicate, but a DIFFERENT active mapping
+    // already exists for this mailbox → activating this one would create two
+    // active destinations, which the service must refuse.
+    findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'other-active' });
+
+    await expect(
+      updateTelegramMapping('tm_1', {
+        mailboxId: 'mb_1',
+        telegramChatId: '-1008888888888',
+        telegramGroupName: 'Client A',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramMappingConflictError);
+    expect(update).not.toHaveBeenCalled();
+  });
 });
 
 describe('disableTelegramMapping', () => {
