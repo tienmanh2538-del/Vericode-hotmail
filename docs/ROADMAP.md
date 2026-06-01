@@ -148,3 +148,54 @@ lưu ý:   - Tối ưu hóa Delta Polling: Hỗ trợ bootstrap mailbox cực l�
 
 \- TASK-040: MVP acceptance review
 \- TASK-041-flexible-telegram-routing.md
+
+## Nguyên tắc bắt buộc cho toàn bộ lộ trình internal production (Sprint 10 → 15)
+
+Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-061:
+
+1. **Mỗi mailbox chỉ có một active Telegram group/topic destination.** Khi gửi verification
+   code, mailbox resolve đúng **một** destination active của chính nó.
+2. **KHÔNG làm 1 mailbox → nhiều Telegram destination.** Hướng này nằm ngoài scope toàn bộ
+   lộ trình. (TASK-041 cho phép NHIỀU mailbox → CÙNG một group/topic một cách có chủ đích,
+   nhưng một mailbox vẫn chỉ có một destination.)
+3. **Microsoft publisher verification KHÔNG phải blocker hiện tại.** Chỉ theo dõi; chỉ xử lý
+   nếu/khi consent thực tế bị chặn (ví dụ tenant yêu cầu admin consent, hoặc `AADSTS65001` /
+   consent required). Tham chiếu `docs/MICROSOFT_SETUP.md`.
+
+## Sprint 10 — Internal production readiness
+
+- TASK-042: Internal production readiness plan
+- TASK-043: Prisma Client generation hardening
+- TASK-044: Confirm one-mailbox-one-destination routing rule
+
+## Sprint 11 — Staff operation model
+
+- TASK-045: Internal staff ownership & assignment model
+- TASK-046: Staff dashboard UX for high mailbox volume
+- TASK-047: Safe mailbox onboarding flow
+
+## Sprint 12 — Staging deployment
+
+- TASK-048: Choose deployment platform & staging architecture
+- TASK-049: Staging infrastructure setup
+- TASK-050: Microsoft App Registration staging validation
+- TASK-051: Staging live mailbox E2E test
+
+## Sprint 13 — Scale readiness
+
+- TASK-052: Scale test plan for 100–200 mailboxes per staff
+- TASK-053: Per-mailbox throttling & queue safety
+- TASK-054: Operational health dashboard for staff workload
+
+## Sprint 14 — Production security & internal launch
+
+- TASK-055: Production auth hardening for internal staff
+- TASK-056: Production environment & secret setup
+- TASK-057: Production deployment limited internal beta
+- TASK-058: Backup, restore & incident response
+
+## Sprint 15 — Internal operations
+
+- TASK-059: Staff onboarding guide
+- TASK-060: Daily operations checklist
+- TASK-061: Production scale-up from beta to full internal use
