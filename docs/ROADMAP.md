@@ -176,7 +176,7 @@ Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-0
 
 ## Sprint 12 — Staging deployment
 
-- TASK-048: Choose deployment platform & staging architecture
+- TASK-048: Choose deployment platform & staging architecture — quyết định: Railway (khuyến nghị), Render (dự phòng), Vercel-only không phù hợp do worker long-running. Xem `docs/reports/TASK-048-choose-deployment-platform-staging-architecture.md`.
 - TASK-049: Staging infrastructure setup
 - TASK-050: Microsoft App Registration staging validation
 - TASK-051: Staging live mailbox E2E test

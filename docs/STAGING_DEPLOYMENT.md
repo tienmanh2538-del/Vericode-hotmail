@@ -39,9 +39,14 @@ Staging **không** dùng để:
 
 ## 5.2. Staging architecture
 
+> Platform staging đã chốt ở **TASK-048**: **Railway** là khuyến nghị chính (web +
+> PostgreSQL + Redis + worker trong cùng một project), **Render** là phương án dự
+> phòng tương đương. Vercel-only không phù hợp vì worker long-running phải tách sang
+> nền khác. Chi tiết so sánh và kiến trúc: `docs/reports/TASK-048-choose-deployment-platform-staging-architecture.md`.
+
 ```text
 GitHub (branch deploy lên staging)
-  -> Deploy platform (Vercel / Railway / Render / Fly / ...)
+  -> Deploy platform (khuyến nghị: Railway; dự phòng: Render — xem TASK-048)
        -> Next.js app (APP_ENV=staging, HTTPS public domain)
        -> Staging PostgreSQL database (riêng, KHÔNG phải production)
        -> Staging Redis / BullMQ queue (cho email worker)
