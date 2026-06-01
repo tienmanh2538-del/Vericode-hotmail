@@ -72,3 +72,39 @@
 .muted {
   color: #64748b;
 }
+
+/* TASK-046 — derived mailbox readiness badges. */
+.readyOk {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.readyNeedsMapping {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.readyTokenIssue {
+  background: #fde68a;
+  color: #92400e;
+}
+
+.readySubscriptionIssue {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.readyWebhookIssue {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.readyDisabled {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.readyError {
+  background: #fecaca;
+  color: #7f1d1d;
+}

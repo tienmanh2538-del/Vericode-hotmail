@@ -2,6 +2,7 @@ import { ConnectMailboxButton } from '@/components/admin/ConnectMailboxButton';
 import { MailboxListTable } from '@/components/tables/MailboxListTable';
 import { resolveCustomerScope, type CustomerScope } from '@/lib/auth/access-scope';
 import { requireAdminAccess } from '@/lib/auth/guards';
+import { hasPermission } from '@/lib/auth/permissions';
 import { createLogger } from '@/lib/logger';
 import {
   listMailboxesForAdmin,
@@ -34,6 +35,10 @@ export default async function MailboxesListPage() {
   // TASK-045 — STAFF_READ_ONLY only sees mailboxes of assigned customers.
   const user = await requireAdminAccess();
   const scope = await resolveCustomerScope(user);
+  // TASK-046 — only OWNER/ADMIN may connect mailboxes. STAFF_READ_ONLY holds no
+  // MANAGE_MAILBOXES grant, so the connect (create) action is hidden for them.
+  // The backend connect-url route stays guarded regardless of this UI hiding.
+  const canManage = hasPermission(user.role, 'MANAGE_MAILBOXES');
   const result = await loadMailboxes(scope);
 
   return (
@@ -46,7 +51,9 @@ export default async function MailboxesListPage() {
             mapping và Microsoft Graph subscription.
           </p>
         </div>
-        <ConnectMailboxButton variant="compact" showIntro={false} />
+        {canManage ? (
+          <ConnectMailboxButton variant="compact" showIntro={false} />
+        ) : null}
       </div>
 
       {!result.ok ? (
@@ -64,7 +71,7 @@ export default async function MailboxesListPage() {
             email xác minh Facebook/Meta. Mailbox sau khi OAuth thành công sẽ
             xuất hiện ở đây.
           </p>
-          <ConnectMailboxButton />
+          {canManage ? <ConnectMailboxButton /> : null}
         </div>
       ) : (
         <MailboxListTable mailboxes={result.mailboxes} />

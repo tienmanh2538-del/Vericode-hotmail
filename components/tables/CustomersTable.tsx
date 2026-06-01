@@ -3,13 +3,15 @@ import type { CustomerRecord } from "@/services/customers/customer.service";
 
 interface CustomersTableProps {
   customers: CustomerRecord[];
+  // TASK-046 — when false (STAFF_READ_ONLY), the per-row Edit action is hidden.
+  canManage?: boolean;
 }
 
 function formatDate(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
-export function CustomersTable({ customers }: CustomersTableProps) {
+export function CustomersTable({ customers, canManage = true }: CustomersTableProps) {
   if (customers.length === 0) {
     return (
       <p className="customers-empty">
@@ -25,7 +27,7 @@ export function CustomersTable({ customers }: CustomersTableProps) {
           <th scope="col">Name</th>
           <th scope="col">Status</th>
           <th scope="col">Created</th>
-          <th scope="col">Actions</th>
+          {canManage ? <th scope="col">Actions</th> : null}
         </tr>
       </thead>
       <tbody>
@@ -40,14 +42,16 @@ export function CustomersTable({ customers }: CustomersTableProps) {
               </span>
             </td>
             <td>{formatDate(customer.createdAt)}</td>
-            <td>
-              <Link
-                href={`/admin/customers/${customer.id}/edit`}
-                className="customers-table__action"
-              >
-                Edit
-              </Link>
-            </td>
+            {canManage ? (
+              <td>
+                <Link
+                  href={`/admin/customers/${customer.id}/edit`}
+                  className="customers-table__action"
+                >
+                  Edit
+                </Link>
+              </td>
+            ) : null}
           </tr>
         ))}
       </tbody>
