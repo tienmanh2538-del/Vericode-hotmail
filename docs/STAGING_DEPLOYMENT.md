@@ -13,6 +13,9 @@ Liên quan:
 - `docs/MICROSOFT_SETUP.md` — App Registration (có mục staging redirect URI / webhook).
 - `docs/SECURITY_RULES.md` — quy tắc bảo mật nền tảng.
 - `.env.example` — nguồn gốc danh sách biến môi trường thật của project.
+- `docs/reports/TASK-048-choose-deployment-platform-staging-architecture.md` — chọn platform.
+- `docs/reports/TASK-049-staging-infrastructure-setup.md` — checklist setup theo Railway
+  (tách rõ việc làm trong repo và việc user thao tác thủ công).
 
 ---
 
@@ -246,6 +249,40 @@ Rollback = quay lại phiên bản deploy trước nếu bản mới lỗi.
 [ ] Microsoft redirect URI khớp tuyệt đối với env.
 [ ] App Registration staging tách biệt local/prod; ENCRYPTION_KEY tạo mới cho staging.
 [ ] GitHub Actions / CI pass (npm run verify).
+```
+
+---
+
+## 5.12. Railway staging setup (platform đã chốt — TASK-048/049)
+
+> Platform khuyến nghị: **Railway** (web + PostgreSQL + Redis + 3 worker trong một
+> project). **Render** là phương án dự phòng tương đương (Web Service + Background
+> Worker + Postgres + Key Value). Chi tiết và bản tách "việc trong repo vs việc user
+> làm thủ công": `docs/reports/TASK-049-staging-infrastructure-setup.md`.
+
+Service cần tạo trên một Railway project staging (tách hoàn toàn production):
+
+| Service | Loại | Command / nguồn |
+|---------|------|-----------------|
+| web | Web (cùng repo) | build `npm run build`, start `npm run start` |
+| postgres | PostgreSQL template | RIÊNG staging, không đụng production |
+| redis | Redis template | RIÊNG staging, không đụng production |
+| worker-email | Worker (cùng repo) | `npm run worker:email` |
+| worker-delta | Worker (cùng repo) | `npm run worker:delta` |
+| worker-renewal | Worker (cùng repo) | `npm run worker:renewal` |
+
+Checklist thao tác (user làm trên dashboard — không paste secret thật vào AI):
+
+```text
+[ ] Tạo Railway project staging, tách hoàn toàn production.
+[ ] Tạo postgres + redis từ template (RIÊNG staging).
+[ ] Tạo web service; set Variables (DATABASE_URL/REDIS_URL trỏ service staging, không prod).
+[ ] Bật public HTTPS domain (.railway.app); cập nhật APP_URL + URL OAuth/webhook.
+[ ] Chạy migration: npx prisma migrate deploy  (KHÔNG migrate dev).
+[ ] Tạo 3 worker service (email/delta/renewal) dùng chung nhóm Variables staging.
+[ ] Worker CHỈ chạy trên Railway; không chạy worker local trỏ DB/Redis staging.
+[ ] Telegram TEST bot + TEST group; mailbox TEST — không dùng của khách hàng thật.
+[ ] Smoke test theo §5.9. (App Registration staging = TASK-050; live E2E = TASK-051.)
 ```
 
 ---

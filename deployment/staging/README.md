@@ -39,3 +39,8 @@ See **[../../docs/STAGING_DEPLOYMENT.md](../../docs/STAGING_DEPLOYMENT.md)** for
 the complete staging deployment guide: architecture, required services,
 environment variables, Microsoft / Telegram / database / worker setup, smoke
 tests, rollback plan, and the security checklist.
+
+Platform chosen for staging is **Railway** (Render as an equivalent fallback). The
+concrete, service-by-service setup checklist — split into repo-side work and the
+manual dashboard steps the operator must do — lives in
+**[../../docs/reports/TASK-049-staging-infrastructure-setup.md](../../docs/reports/TASK-049-staging-infrastructure-setup.md)**.
