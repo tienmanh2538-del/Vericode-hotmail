@@ -79,6 +79,11 @@
   color: #166534;
 }
 
+.readyNeedsCustomer {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
 .readyNeedsMapping {
   background: #fef3c7;
   color: #92400e;

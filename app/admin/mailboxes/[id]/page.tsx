@@ -1,11 +1,17 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { MailboxReadinessBadge } from '@/components/status/MailboxReadinessBadge';
 import { MailboxStatusBadge } from '@/components/status/MailboxStatusBadge';
 import { SubscriptionStatusBadge } from '@/components/status/SubscriptionStatusBadge';
 import { TelegramMappingStatusBadge } from '@/components/status/TelegramMappingStatusBadge';
 import { resolveCustomerScope, type CustomerScope } from '@/lib/auth/access-scope';
 import { requireAdminAccess } from '@/lib/auth/guards';
+import { hasPermission } from '@/lib/auth/permissions';
 import { createLogger } from '@/lib/logger';
+import {
+  deriveMailboxReadiness,
+  mailboxHasCustomer,
+} from '@/lib/mailboxes/mailbox-list-filter';
 import {
   getMailboxDetailById,
   type MailboxDetail,
@@ -49,6 +55,21 @@ function formatDateTime(value: Date | null): string {
 function formatDate(value: Date | null): string {
   if (!value) return '—';
   return value.toISOString().slice(0, 10);
+}
+
+// TASK-047 — human label for the Telegram destination a code would be sent to.
+// Shows the group plus the forum topic (and its thread id) when present so the
+// operator can confirm the exact target before relying on the mailbox.
+function formatDestination(
+  mapping: MailboxDetailTelegramMapping | null,
+): string | null {
+  if (!mapping) return null;
+  const group = mapping.telegramGroupName ?? mapping.telegramChatIdMasked;
+  if (mapping.telegramThreadId) {
+    const topic = mapping.telegramTopicName ?? 'Topic';
+    return `${group} › ${topic} (#${mapping.telegramThreadId})`;
+  }
+  return group;
 }
 
 const PROCESSED_STATUS_LABEL: Record<
@@ -96,10 +117,28 @@ export default async function MailboxDetailPage({
   const { mailbox, telegramMappings, graphSubscriptions, recentProcessedMessages } =
     result.detail;
 
+  // TASK-047 — onboarding actions (create/edit mapping) are OWNER/ADMIN only.
+  // STAFF_READ_ONLY sees the same readiness state but no management CTA. The
+  // backend mapping actions stay guarded regardless of this UI hiding.
+  const canManageMappings = hasPermission(user.role, 'MANAGE_TELEGRAM_MAPPINGS');
+
   const customerLabel =
     mailbox.customerName ?? mailbox.ownerCustomerName ?? '—';
   const latestMapping = telegramMappings[0] ?? null;
   const latestSubscription = graphSubscriptions[0] ?? null;
+
+  // TASK-047 — compute onboarding readiness from existing data (no new columns).
+  const activeMapping =
+    telegramMappings.find((mapping) => mapping.status === 'ACTIVE') ?? null;
+  const hasCustomer = mailboxHasCustomer(mailbox);
+  const readiness = deriveMailboxReadiness({
+    status: mailbox.status,
+    customerName: mailbox.customerName,
+    ownerCustomerName: mailbox.ownerCustomerName,
+    telegramMappingStatus: activeMapping ? 'ACTIVE' : latestMapping?.status ?? null,
+    subscriptionStatus: latestSubscription?.status ?? null,
+  });
+  const activeDestinationLabel = formatDestination(activeMapping);
 
   return (
     <>
@@ -152,6 +191,59 @@ export default async function MailboxDetailPage({
             />
           </p>
         </div>
+      </section>
+
+      <section
+        className="mailbox-detail__section"
+        aria-label="Onboarding readiness"
+      >
+        <h3 className="mailbox-detail__section-title">
+          Onboarding readiness{' '}
+          <MailboxReadinessBadge readiness={readiness} />
+        </h3>
+
+        {readiness !== 'READY' ? (
+          <div className="admin-banner admin-banner--warning" role="status">
+            <strong>Mailbox chưa sẵn sàng relay code.</strong>{' '}
+            {!hasCustomer
+              ? 'Hãy gắn mailbox này vào đúng customer trước.'
+              : !activeMapping
+                ? 'Mailbox chưa có active Telegram destination. Cần tạo mapping trước khi coi là Ready.'
+                : 'Mailbox đang ở trạng thái lỗi vận hành (token/subscription/webhook). Kiểm tra chi tiết bên dưới.'}
+          </div>
+        ) : null}
+
+        <ul className="mailbox-detail__checklist">
+          <li>
+            <span aria-hidden="true">✓</span> Mailbox đã connect ({mailbox.provider})
+          </li>
+          <li>
+            <span aria-hidden="true">{hasCustomer ? '✓' : '✗'}</span> Gắn customer:{' '}
+            <strong>{customerLabel}</strong>
+          </li>
+          <li>
+            <span aria-hidden="true">{activeMapping ? '✓' : '✗'}</span> Active
+            Telegram destination:{' '}
+            {activeDestinationLabel ? (
+              <strong>{activeDestinationLabel}</strong>
+            ) : (
+              <em>chưa có active mapping</em>
+            )}
+          </li>
+        </ul>
+
+        {readiness !== 'READY' && canManageMappings ? (
+          <p className="mailbox-detail__cta">
+            <Link href="/admin/telegram" className="customers-table__action">
+              Mở Telegram mappings để hoàn tất thiết lập →
+            </Link>
+          </p>
+        ) : null}
+        {readiness !== 'READY' && !canManageMappings ? (
+          <p className="mailbox-detail__muted">
+            Bạn chỉ có quyền xem. Liên hệ OWNER/ADMIN để hoàn tất thiết lập mapping.
+          </p>
+        ) : null}
       </section>
 
       <section
@@ -249,6 +341,7 @@ function TelegramMappingTable({
         <tr>
           <th scope="col">Status</th>
           <th scope="col">Group</th>
+          <th scope="col">Topic</th>
           <th scope="col">Chat ID</th>
           <th scope="col">Created</th>
           <th scope="col">Updated</th>
@@ -261,6 +354,18 @@ function TelegramMappingTable({
               <TelegramMappingStatusBadge status={mapping.status} />
             </td>
             <td>{mapping.telegramGroupName ?? '—'}</td>
+            <td>
+              {mapping.telegramThreadId ? (
+                <span>
+                  {mapping.telegramTopicName ?? 'Topic'}{' '}
+                  <span className="mailbox-detail__mono">
+                    #{mapping.telegramThreadId}
+                  </span>
+                </span>
+              ) : (
+                '—'
+              )}
+            </td>
             <td>
               <span className="mailbox-detail__mono">
                 {mapping.telegramChatIdMasked}

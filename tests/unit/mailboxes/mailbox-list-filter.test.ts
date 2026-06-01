@@ -6,6 +6,7 @@ import {
   deriveMailboxReadiness,
   filterMailboxes,
   mailboxCustomerLabel,
+  mailboxHasCustomer,
   type MailboxListFilters,
 } from '@/lib/mailboxes/mailbox-list-filter';
 import type { MailboxListItem } from '@/services/microsoft/mailbox-list.service';
@@ -75,6 +76,68 @@ describe('deriveMailboxReadiness', () => {
     expect(deriveMailboxReadiness(makeMailbox({ status: 'DISABLED' }))).toBe(
       'DISABLED',
     );
+  });
+});
+
+describe('deriveMailboxReadiness — customer requirement (TASK-047)', () => {
+  it('is NEEDS_CUSTOMER when an ACTIVE mailbox has no customer, even with an active mapping', () => {
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({
+          status: 'ACTIVE',
+          customerName: null,
+          ownerCustomerName: null,
+          telegramMappingStatus: 'ACTIVE',
+        }),
+      ),
+    ).toBe('NEEDS_CUSTOMER');
+  });
+
+  it('accepts the denormalised ownerCustomerName as a customer', () => {
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({
+          customerName: null,
+          ownerCustomerName: 'Legacy Co',
+          telegramMappingStatus: 'ACTIVE',
+        }),
+      ),
+    ).toBe('READY');
+  });
+
+  it('is only READY with BOTH a customer and an active destination', () => {
+    expect(deriveMailboxReadiness(makeMailbox())).toBe('READY');
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({ customerName: 'Acme', telegramMappingStatus: null }),
+      ),
+    ).toBe('NEEDS_MAPPING');
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({
+          customerName: null,
+          ownerCustomerName: null,
+          telegramMappingStatus: null,
+        }),
+      ),
+    ).toBe('NEEDS_CUSTOMER');
+  });
+});
+
+describe('mailboxHasCustomer', () => {
+  it('is true with either a joined or denormalised customer name', () => {
+    expect(
+      mailboxHasCustomer({ customerName: 'Acme', ownerCustomerName: null }),
+    ).toBe(true);
+    expect(
+      mailboxHasCustomer({ customerName: null, ownerCustomerName: 'Legacy Co' }),
+    ).toBe(true);
+  });
+
+  it('is false when both are null', () => {
+    expect(
+      mailboxHasCustomer({ customerName: null, ownerCustomerName: null }),
+    ).toBe(false);
   });
 });
 

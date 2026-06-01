@@ -1,6 +1,8 @@
 import type {
+  GraphSubscriptionStatusValue,
   MailboxListItem,
   MailboxStatusValue,
+  TelegramMappingStatusValue,
 } from '@/services/microsoft/mailbox-list.service';
 
 // TASK-046 — pure, UI-free helpers for the mailbox list dashboard.
@@ -19,6 +21,7 @@ import type {
  */
 export type MailboxReadiness =
   | 'READY'
+  | 'NEEDS_CUSTOMER'
   | 'NEEDS_MAPPING'
   | 'TOKEN_ISSUE'
   | 'SUBSCRIPTION_ISSUE'
@@ -28,6 +31,8 @@ export type MailboxReadiness =
 
 export const READINESS_LABEL: Record<MailboxReadiness, string> = {
   READY: 'Ready',
+  // TASK-047 — a connected mailbox with no customer is NOT ready to relay codes.
+  NEEDS_CUSTOMER: 'Needs customer',
   NEEDS_MAPPING: 'Needs mapping',
   TOKEN_ISSUE: 'Token issue',
   SUBSCRIPTION_ISSUE: 'Subscription issue',
@@ -36,9 +41,11 @@ export const READINESS_LABEL: Record<MailboxReadiness, string> = {
   ERROR: 'Error',
 };
 
-// Order shown in the readiness filter dropdown.
+// Order shown in the readiness filter dropdown. Onboarding gaps (customer, then
+// mapping) follow Ready; operational problems come last.
 export const READINESS_ORDER: readonly MailboxReadiness[] = [
   'READY',
+  'NEEDS_CUSTOMER',
   'NEEDS_MAPPING',
   'TOKEN_ISSUE',
   'SUBSCRIPTION_ISSUE',
@@ -59,17 +66,43 @@ export function mailboxCustomerLabel(item: MailboxListItem): string {
   return item.customerName ?? item.ownerCustomerName ?? '—';
 }
 
-function hasActiveMapping(item: MailboxListItem): boolean {
-  return item.telegramMappingStatus === 'ACTIVE';
+/**
+ * Minimal shape needed to compute readiness. `MailboxListItem` satisfies it, and
+ * the mailbox detail page builds the same shape from its richer data, so list
+ * and detail share ONE definition of "is this mailbox ready?" (TASK-047).
+ */
+export interface MailboxReadinessInput {
+  status: MailboxStatusValue;
+  customerName: string | null;
+  ownerCustomerName: string | null;
+  telegramMappingStatus: TelegramMappingStatusValue | null;
+  subscriptionStatus: GraphSubscriptionStatusValue | null;
+}
+
+/** True when the mailbox is attached to a customer (joined or denormalised). */
+export function mailboxHasCustomer(input: {
+  customerName: string | null;
+  ownerCustomerName: string | null;
+}): boolean {
+  return Boolean(input.customerName ?? input.ownerCustomerName);
+}
+
+function hasActiveMapping(input: MailboxReadinessInput): boolean {
+  return input.telegramMappingStatus === 'ACTIVE';
 }
 
 /**
  * Derive a single readiness signal. Problem states (token/subscription/webhook/
- * error/disabled) take precedence over mapping readiness so a broken mailbox is
- * never mislabelled "Ready". Only data already present on the list item is used.
+ * error/disabled) take precedence so a broken mailbox is never mislabelled
+ * "Ready". TASK-047: a mailbox is only READY when it is ACTIVE, attached to a
+ * customer, AND has an active Telegram destination — otherwise it surfaces the
+ * specific onboarding gap (Needs customer / Needs mapping). Only data already
+ * present on the input is used (no new columns, no migration).
  */
-export function deriveMailboxReadiness(item: MailboxListItem): MailboxReadiness {
-  switch (item.status) {
+export function deriveMailboxReadiness(
+  input: MailboxReadinessInput,
+): MailboxReadiness {
+  switch (input.status) {
     case 'DISABLED':
       return 'DISABLED';
     case 'RECONNECT_REQUIRED':
@@ -87,13 +120,15 @@ export function deriveMailboxReadiness(item: MailboxListItem): MailboxReadiness 
   // status === 'ACTIVE'. A degraded Graph subscription is still worth flagging
   // even when the mailbox row itself is ACTIVE.
   if (
-    item.subscriptionStatus === 'EXPIRED' ||
-    item.subscriptionStatus === 'FAILED'
+    input.subscriptionStatus === 'EXPIRED' ||
+    input.subscriptionStatus === 'FAILED'
   ) {
     return 'SUBSCRIPTION_ISSUE';
   }
 
-  return hasActiveMapping(item) ? 'READY' : 'NEEDS_MAPPING';
+  if (!mailboxHasCustomer(input)) return 'NEEDS_CUSTOMER';
+
+  return hasActiveMapping(input) ? 'READY' : 'NEEDS_MAPPING';
 }
 
 export interface MailboxListFilters {

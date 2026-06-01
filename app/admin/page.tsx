@@ -1,4 +1,9 @@
+import Link from "next/link";
 import { ConnectMailboxButton } from "@/components/admin/ConnectMailboxButton";
+import { requireAdminAccess } from "@/lib/auth/guards";
+import { hasPermission } from "@/lib/auth/permissions";
+
+export const dynamic = "force-dynamic";
 
 interface PlaceholderCard {
   label: string;
@@ -59,7 +64,13 @@ interface AdminDashboardPageProps {
   };
 }
 
-export default function AdminDashboardPage({ searchParams }: AdminDashboardPageProps) {
+export default async function AdminDashboardPage({
+  searchParams,
+}: AdminDashboardPageProps) {
+  // TASK-047 — connect mailbox is an onboarding action: OWNER/ADMIN only.
+  // STAFF_READ_ONLY (no MANAGE_MAILBOXES) sees the dashboard but not the action.
+  const user = await requireAdminAccess();
+  const canManageMailboxes = hasPermission(user.role, "MANAGE_MAILBOXES");
   const status = parseStatus(searchParams?.oauth);
   const reason = parseReason(searchParams?.reason);
 
@@ -73,7 +84,11 @@ export default function AdminDashboardPage({ searchParams }: AdminDashboardPageP
           role="status"
           aria-live="polite"
         >
-          Mailbox đã connect thành công.
+          Mailbox đã connect thành công.{" "}
+          <Link href="/admin/mailboxes">
+            Mở danh sách mailbox để hoàn tất thiết lập (gắn customer + Telegram
+            mapping) trước khi coi là Ready →
+          </Link>
         </div>
       ) : null}
 
@@ -86,7 +101,7 @@ export default function AdminDashboardPage({ searchParams }: AdminDashboardPageP
         </div>
       ) : null}
 
-      <ConnectMailboxButton />
+      {canManageMailboxes ? <ConnectMailboxButton /> : null}
 
       <section className="admin-card-grid" aria-label="System overview">
         {PLACEHOLDER_CARDS.map((card) => (

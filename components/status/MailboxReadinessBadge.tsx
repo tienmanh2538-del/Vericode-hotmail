@@ -10,6 +10,7 @@ interface MailboxReadinessBadgeProps {
 
 const VARIANT: Record<MailboxReadiness, string> = {
   READY: styles.readyOk,
+  NEEDS_CUSTOMER: styles.readyNeedsCustomer,
   NEEDS_MAPPING: styles.readyNeedsMapping,
   TOKEN_ISSUE: styles.readyTokenIssue,
   SUBSCRIPTION_ISSUE: styles.readySubscriptionIssue,
