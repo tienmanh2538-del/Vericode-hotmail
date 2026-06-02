@@ -276,7 +276,7 @@ describe('GET callback — invalid state', () => {
 });
 
 describe('GET callback — token exchange success', () => {
-  it('redirects to /admin?oauth=success and never leaks tokens', async () => {
+  it('redirects to /admin/mailboxes?oauth=success and never leaks tokens', async () => {
     const fetchMock = stubFetchTokenSuccess();
     const request = makeRequest(
       `code=${FAKE_CODE}&state=${FAKE_STATE}`,
@@ -286,7 +286,7 @@ describe('GET callback — token exchange success', () => {
 
     expect([302, 303, 307, 308]).toContain(response.status);
     const loc = parseLocation(response.headers.get('location'));
-    expect(loc.pathname).toBe('/admin');
+    expect(loc.pathname).toBe('/admin/mailboxes');
     expect(loc.searchParams.get('oauth')).toBe('success');
     expect(loc.searchParams.get('reason')).toBeNull();
 

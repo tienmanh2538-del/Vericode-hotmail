@@ -16,7 +16,9 @@ export async function POST(_request: NextRequest): Promise<NextResponse> {
   response.cookies.set(STAGING_SESSION_COOKIE, '', {
     httpOnly: true,
     secure: true,
-    sameSite: 'strict',
+    // Match the login cookie's attributes (SameSite=Lax) so this clearing
+    // cookie reliably overwrites it. See staging-login/route.ts for why Lax.
+    sameSite: 'lax',
     path: '/',
     maxAge: 0,
   });
