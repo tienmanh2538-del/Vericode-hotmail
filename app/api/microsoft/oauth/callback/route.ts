@@ -55,12 +55,16 @@ function clearStateCookie(response: NextResponse, env: EnvValues): void {
 }
 
 function buildRedirect(
-  request: NextRequest,
   env: EnvValues,
   status: 'success' | 'error',
   reason?: CallbackReason,
 ): NextResponse {
-  const target = new URL('/admin', request.url);
+  // Anchor the post-OAuth redirect to APP_URL (the canonical public origin),
+  // NOT request.url. Behind Railway's proxy the app binds to an internal port,
+  // so request.url resolves to http://localhost:8080 — redirecting there sends
+  // the browser to a dead address (ERR_CONNECTION_REFUSED) even though the
+  // mailbox was already persisted. Same fix as the staging login/logout routes.
+  const target = new URL('/admin', env.APP_URL);
   target.searchParams.set('oauth', status);
   if (reason) target.searchParams.set('reason', reason);
   const response = NextResponse.redirect(target);
@@ -84,12 +88,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       microsoftError: errorParam,
       reason,
     });
-    return buildRedirect(request, env, 'error', reason);
+    return buildRedirect(env, 'error', reason);
   }
 
   if (typeof code !== 'string' || code.length === 0) {
     logger.warn('Microsoft OAuth callback missing code');
-    return buildRedirect(request, env, 'error', 'missing_code');
+    return buildRedirect(env, 'error', 'missing_code');
   }
 
   if (
@@ -100,7 +104,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     !safeStateEquals(stateParam, cookieState)
   ) {
     logger.warn('Microsoft OAuth callback state invalid');
-    return buildRedirect(request, env, 'error', 'invalid_state');
+    return buildRedirect(env, 'error', 'invalid_state');
   }
 
   let tokens;
@@ -116,14 +120,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     } else {
       logger.error('Microsoft OAuth callback unexpected error');
     }
-    return buildRedirect(request, env, 'error', 'token_exchange_failed');
+    return buildRedirect(env, 'error', 'token_exchange_failed');
   }
 
   // offline_access is required for refresh_token; without it we cannot keep
   // the mailbox ACTIVE, so we refuse to persist a half-connected mailbox.
   if (!tokens.refreshToken) {
     logger.warn('Microsoft OAuth callback succeeded without refresh_token');
-    return buildRedirect(request, env, 'error', 'token_exchange_failed');
+    return buildRedirect(env, 'error', 'token_exchange_failed');
   }
 
   try {
@@ -131,7 +135,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const emailAddress = profile.mail ?? profile.userPrincipalName;
     if (typeof emailAddress !== 'string' || emailAddress.length === 0) {
       logger.warn('Microsoft profile missing both mail and userPrincipalName');
-      return buildRedirect(request, env, 'error', 'mailbox_save_failed');
+      return buildRedirect(env, 'error', 'mailbox_save_failed');
     }
 
     await saveConnectedMailbox({
@@ -147,8 +151,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     } else {
       logger.error('Microsoft OAuth mailbox save unexpected error');
     }
-    return buildRedirect(request, env, 'error', 'mailbox_save_failed');
+    return buildRedirect(env, 'error', 'mailbox_save_failed');
   }
 
-  return buildRedirect(request, env, 'success');
+  return buildRedirect(env, 'success');
 }
