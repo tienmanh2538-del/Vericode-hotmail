@@ -7,6 +7,8 @@ const {
   create,
   update,
   deleteFn,
+  mailboxFindUnique,
+  destinationFindUnique,
 } = vi.hoisted(() => ({
   findMany: vi.fn(),
   findUnique: vi.fn(),
@@ -14,6 +16,8 @@ const {
   create: vi.fn(),
   update: vi.fn(),
   deleteFn: vi.fn(),
+  mailboxFindUnique: vi.fn(),
+  destinationFindUnique: vi.fn(),
 }));
 
 vi.mock('@/lib/prisma', () => ({
@@ -26,16 +30,24 @@ vi.mock('@/lib/prisma', () => ({
       update,
       delete: deleteFn,
     },
+    mailbox: {
+      findUnique: mailboxFindUnique,
+    },
+    telegramDestination: {
+      findUnique: destinationFindUnique,
+    },
   },
 }));
 
 import {
   createTelegramMapping,
+  createTelegramMappingFromDestination,
   deleteTelegramMapping,
   disableTelegramMapping,
   findActiveMappingForMailbox,
   getTelegramMappingById,
   listTelegramMappings,
+  TelegramDestinationMappingConflictError,
   TelegramMappingConflictError,
   TelegramMappingValidationError,
   updateTelegramMapping,
@@ -65,6 +77,8 @@ beforeEach(() => {
   create.mockReset();
   update.mockReset();
   deleteFn.mockReset();
+  mailboxFindUnique.mockReset();
+  destinationFindUnique.mockReset();
 });
 
 describe('listTelegramMappings', () => {
@@ -85,6 +99,9 @@ describe('listTelegramMappings', () => {
       telegramThreadId: null,
       telegramTopicName: null,
       status: 'ACTIVE',
+      destinationId: null,
+      destinationName: null,
+      destinationStatus: null,
       createdAt: FIXTURE_ROW.createdAt,
       updatedAt: FIXTURE_ROW.updatedAt,
     });
@@ -406,5 +423,183 @@ describe('findActiveMappingForMailbox', () => {
       }),
     );
     expect(result?.id).toBe('tm_1');
+  });
+
+  it('resolves chat/thread from the linked destination (TASK-053)', async () => {
+    // The mapping snapshot may be stale; the live destination is the source of
+    // truth, so the pipeline must route using the destination's chat/thread.
+    findFirst.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      telegramChatId: '-1000000000000',
+      telegramThreadId: null,
+      destination: {
+        id: 'dest_1',
+        displayName: 'Client A group',
+        telegramGroupName: 'Client A — live',
+        telegramTopicName: 'Codes',
+        telegramChatId: '-1001234567890',
+        telegramThreadId: '42',
+        status: 'ACTIVE',
+      },
+    });
+    const result = await findActiveMappingForMailbox('client-a@hotmail.com');
+    expect(result?.telegramChatId).toBe('-1001234567890');
+    expect(result?.telegramThreadId).toBe('42');
+    expect(result?.telegramGroupName).toBe('Client A — live');
+  });
+
+  it('returns null when the linked destination is DISABLED (TASK-053)', async () => {
+    // Mapping row is ACTIVE but its destination is disabled → must not deliver.
+    findFirst.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      destination: {
+        id: 'dest_1',
+        displayName: 'Client A group',
+        telegramGroupName: 'Client A',
+        telegramTopicName: null,
+        telegramChatId: '-1001234567890',
+        telegramThreadId: null,
+        status: 'DISABLED',
+      },
+    });
+    const result = await findActiveMappingForMailbox('client-a@hotmail.com');
+    expect(result).toBeNull();
+  });
+});
+
+describe('createTelegramMappingFromDestination (TASK-053)', () => {
+  const ACTIVE_DESTINATION = {
+    id: 'dest_1',
+    customerId: 'cu_1',
+    status: 'ACTIVE',
+    telegramChatId: '-1001234567890',
+    telegramGroupName: 'Client A group',
+    telegramThreadId: '42',
+    telegramTopicName: 'Codes',
+  };
+
+  it('derives chat/thread from the destination and writes destinationId', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      destination: {
+        ...ACTIVE_DESTINATION,
+        displayName: 'Client A group',
+      },
+    });
+
+    const result = await createTelegramMappingFromDestination({
+      mailboxId: 'mb_1',
+      destinationId: 'dest_1',
+      status: 'ACTIVE',
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          mailboxId: 'mb_1',
+          destinationId: 'dest_1',
+          telegramChatId: '-1001234567890',
+          telegramThreadId: '42',
+          telegramTopicName: 'Codes',
+          status: 'ACTIVE',
+        }),
+      }),
+    );
+    expect(result.destinationId).toBe('dest_1');
+  });
+
+  it('rejects mapping a mailbox to a destination of a DIFFERENT customer', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue({
+      ...ACTIVE_DESTINATION,
+      customerId: 'cu_other',
+    });
+
+    await expect(
+      createTelegramMappingFromDestination({
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an ACTIVE mapping pointing at a DISABLED destination', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue({
+      ...ACTIVE_DESTINATION,
+      status: 'DISABLED',
+    });
+
+    await expect(
+      createTelegramMappingFromDestination({
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('allows a second mailbox of the same customer to share the destination', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_2', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      id: 'tm_2',
+      mailboxId: 'mb_2',
+      destinationId: 'dest_1',
+    });
+
+    await createTelegramMappingFromDestination({
+      mailboxId: 'mb_2',
+      destinationId: 'dest_1',
+      status: 'ACTIVE',
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ mailboxId: 'mb_2', destinationId: 'dest_1' }),
+      }),
+    );
+  });
+
+  it('rejects a second ACTIVE mapping for the same mailbox', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst
+      .mockResolvedValueOnce(null) // no same (mailbox, chatId) duplicate
+      .mockResolvedValueOnce({ id: 'other-active' }); // existing active mapping
+
+    await expect(
+      createTelegramMappingFromDestination({
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the mailbox has no customer', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: null });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+
+    await expect(
+      createTelegramMappingFromDestination({
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(create).not.toHaveBeenCalled();
   });
 });

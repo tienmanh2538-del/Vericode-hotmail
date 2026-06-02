@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { updateTelegramMappingAction } from "@/services/telegram/mapping-actions";
 import type { TelegramMappingFormState } from "@/services/telegram/mapping-form-state";
 import { getTelegramMappingById } from "@/services/telegram/telegram-mapping.service";
+import { listTelegramDestinations } from "@/services/telegram/telegram-destination.service";
 import "../../../customers/customers.css";
 import "../../telegram.css";
 
@@ -21,19 +22,26 @@ async function listMailboxesForForm(extraMailboxId?: string | null) {
     select: {
       id: true,
       emailAddress: true,
+      customerId: true,
       customer: { select: { name: true } },
     },
   });
   const result = mailboxes.map((mailbox) => ({
     id: mailbox.id,
     emailAddress: mailbox.emailAddress,
+    customerId: mailbox.customerId,
     customerName: mailbox.customer?.name ?? null,
   }));
 
   // Keep the mapping's current mailbox selectable even if it has been removed
   // from the mailbox list, so editing a stale mapping does not break the form.
   if (extraMailboxId && !result.some((m) => m.id === extraMailboxId)) {
-    result.push({ id: extraMailboxId, emailAddress: extraMailboxId, customerName: null });
+    result.push({
+      id: extraMailboxId,
+      emailAddress: extraMailboxId,
+      customerId: null,
+      customerName: null,
+    });
   }
   return result;
 }
@@ -48,7 +56,18 @@ export default async function EditTelegramMappingPage({
     notFound();
   }
 
-  const mailboxes = await listMailboxesForForm(mapping.mailboxId);
+  const [mailboxes, destinations] = await Promise.all([
+    listMailboxesForForm(mapping.mailboxId),
+    listTelegramDestinations(),
+  ]);
+  const destinationOptions = destinations.map((destination) => ({
+    id: destination.id,
+    customerId: destination.customerId,
+    displayName: destination.displayName,
+    telegramGroupName: destination.telegramGroupName,
+    telegramTopicName: destination.telegramTopicName,
+    status: destination.status,
+  }));
 
   const boundAction: (
     state: TelegramMappingFormState,
@@ -64,7 +83,7 @@ export default async function EditTelegramMappingPage({
         <div>
           <h2 className="admin-page__heading">Edit Telegram mapping</h2>
           <p className="customers-subtitle">
-            Update group name, chat ID, or status for{" "}
+            Change the saved destination or status for{" "}
             {mapping.mailboxEmail ?? mapping.mailboxId}.
           </p>
         </div>
@@ -75,12 +94,10 @@ export default async function EditTelegramMappingPage({
       <TelegramMappingForm
         action={boundAction}
         mailboxes={mailboxes}
+        destinations={destinationOptions}
         initialValues={{
           mailboxId: mapping.mailboxId,
-          telegramChatId: mapping.telegramChatId,
-          telegramGroupName: mapping.telegramGroupName ?? "",
-          telegramThreadId: mapping.telegramThreadId ?? "",
-          telegramTopicName: mapping.telegramTopicName ?? "",
+          destinationId: mapping.destinationId ?? "",
           status: mapping.status,
         }}
         submitLabel="Save changes"

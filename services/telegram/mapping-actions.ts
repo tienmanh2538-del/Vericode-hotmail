@@ -4,22 +4,19 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requirePermission } from '@/lib/auth/guards';
 import {
-  createTelegramMapping,
+  createTelegramMappingFromDestination,
   deleteTelegramMapping,
   disableTelegramMapping,
-  TelegramMappingConflictError,
-  TelegramMappingValidationError,
-  updateTelegramMapping,
+  TelegramDestinationMappingConflictError,
+  TelegramDestinationMappingValidationError,
+  updateTelegramMappingFromDestination,
 } from './telegram-mapping.service';
 import type { TelegramMappingFormState } from './mapping-form-state';
 
 function readForm(formData: FormData) {
   return {
     mailboxId: (formData.get('mailboxId') ?? '').toString(),
-    telegramChatId: (formData.get('telegramChatId') ?? '').toString(),
-    telegramGroupName: (formData.get('telegramGroupName') ?? '').toString(),
-    telegramThreadId: (formData.get('telegramThreadId') ?? '').toString(),
-    telegramTopicName: (formData.get('telegramTopicName') ?? '').toString(),
+    destinationId: (formData.get('destinationId') ?? '').toString(),
     status: (formData.get('status') ?? '').toString(),
   };
 }
@@ -28,10 +25,10 @@ function failureState(
   values: ReturnType<typeof readForm>,
   error: unknown,
 ): TelegramMappingFormState {
-  if (error instanceof TelegramMappingValidationError) {
+  if (error instanceof TelegramDestinationMappingValidationError) {
     return { status: 'error', errors: error.errors, values };
   }
-  if (error instanceof TelegramMappingConflictError) {
+  if (error instanceof TelegramDestinationMappingConflictError) {
     return {
       status: 'error',
       errors: { [error.field]: error.message },
@@ -53,7 +50,7 @@ export async function createTelegramMappingAction(
   const values = readForm(formData);
 
   try {
-    await createTelegramMapping(values);
+    await createTelegramMappingFromDestination(values);
   } catch (error) {
     return failureState(values, error);
   }
@@ -71,7 +68,7 @@ export async function updateTelegramMappingAction(
   const values = readForm(formData);
 
   try {
-    await updateTelegramMapping(id, values);
+    await updateTelegramMappingFromDestination(id, values);
   } catch (error) {
     return failureState(values, error);
   }

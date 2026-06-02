@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useFormState, useFormStatus } from "react-dom";
 import { TELEGRAM_MAPPING_STATUS_VALUES } from "@/lib/validation/telegram-mapping";
 import {
@@ -12,7 +12,17 @@ import {
 export interface TelegramMappingFormMailbox {
   id: string;
   emailAddress: string;
+  customerId: string | null;
   customerName: string | null;
+}
+
+export interface TelegramMappingFormDestination {
+  id: string;
+  customerId: string;
+  displayName: string;
+  telegramGroupName: string;
+  telegramTopicName: string | null;
+  status: string;
 }
 
 interface TelegramMappingFormProps {
@@ -21,12 +31,10 @@ interface TelegramMappingFormProps {
     formData: FormData,
   ) => Promise<TelegramMappingFormState>;
   mailboxes: TelegramMappingFormMailbox[];
+  destinations: TelegramMappingFormDestination[];
   initialValues?: {
     mailboxId?: string;
-    telegramChatId?: string;
-    telegramGroupName?: string;
-    telegramThreadId?: string;
-    telegramTopicName?: string;
+    destinationId?: string;
     status?: string;
   };
   submitLabel?: string;
@@ -44,6 +52,7 @@ function SubmitButton({ label }: { label: string }) {
 export function TelegramMappingForm({
   action,
   mailboxes,
+  destinations,
   initialValues,
   submitLabel = "Save mapping",
 }: TelegramMappingFormProps) {
@@ -52,10 +61,7 @@ export function TelegramMappingForm({
         status: "idle",
         values: {
           mailboxId: initialValues.mailboxId ?? "",
-          telegramChatId: initialValues.telegramChatId ?? "",
-          telegramGroupName: initialValues.telegramGroupName ?? "",
-          telegramThreadId: initialValues.telegramThreadId ?? "",
-          telegramTopicName: initialValues.telegramTopicName ?? "",
+          destinationId: initialValues.destinationId ?? "",
           status: initialValues.status ?? "ACTIVE",
         },
       }
@@ -63,25 +69,44 @@ export function TelegramMappingForm({
 
   const [state, formAction] = useFormState(action, initial);
   // `useFormState` can hand back `undefined` for a tick while a server action
-  // that ends in `redirect()` settles (the success path here). Falling back to
-  // the initial state keeps the form from crashing during that transition and
-  // lets the redirect/list refresh finish cleanly.
+  // that ends in `redirect()` settles. Falling back to the initial state keeps
+  // the form from crashing during that transition.
   const safeState = state ?? initial;
   const errors = safeState.errors ?? {};
 
-  // TASK-051 — track the selected mailbox so the operator sees which customer
-  // the code will be routed to. Customer is derived from the chosen mailbox
-  // (never selected independently) to avoid a customer/mailbox mismatch.
+  // Customer is derived from the chosen mailbox (never selected independently)
+  // to avoid a customer/mailbox mismatch.
   const [selectedMailboxId, setSelectedMailboxId] = useState(
     initial.values.mailboxId,
   );
+  const [selectedDestinationId, setSelectedDestinationId] = useState(
+    initial.values.destinationId,
+  );
+
   const selectedMailbox =
     mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) ?? null;
+
+  // Only destinations of the SAME customer as the chosen mailbox are offered.
+  // The service re-checks this — the dropdown filter is UX, not the security
+  // boundary.
+  const availableDestinations = useMemo(() => {
+    if (!selectedMailbox?.customerId) return [];
+    return destinations.filter(
+      (destination) =>
+        destination.customerId === selectedMailbox.customerId &&
+        (destination.status === "ACTIVE" ||
+          destination.id === selectedDestinationId),
+    );
+  }, [destinations, selectedMailbox, selectedDestinationId]);
+
+  const selectedDestination =
+    availableDestinations.find((d) => d.id === selectedDestinationId) ?? null;
 
   if (mailboxes.length === 0) {
     return (
       <p className="telegram-form__empty">
-        No mailboxes available yet. Add a mailbox first before mapping it to a Telegram group.
+        No mailboxes available yet. Add a mailbox first before mapping it to a
+        Telegram destination.
       </p>
     );
   }
@@ -102,7 +127,12 @@ export function TelegramMappingForm({
           id="mapping-mailbox"
           name="mailboxId"
           value={selectedMailboxId}
-          onChange={(event) => setSelectedMailboxId(event.target.value)}
+          onChange={(event) => {
+            setSelectedMailboxId(event.target.value);
+            // Reset the destination — the previous pick may belong to another
+            // customer once the mailbox changes.
+            setSelectedDestinationId("");
+          }}
           aria-invalid={errors.mailboxId ? "true" : undefined}
           aria-describedby={errors.mailboxId ? "mapping-mailbox-error" : undefined}
           className="customer-form__input"
@@ -128,132 +158,77 @@ export function TelegramMappingForm({
         {selectedMailbox ? (
           selectedMailbox.customerName ? (
             <p className="telegram-form__hint">
-              Customer:{" "}
-              <strong>{selectedMailbox.customerName}</strong>{" "}
-              (tự động theo mailbox đã chọn)
+              Customer: <strong>{selectedMailbox.customerName}</strong> (tự động
+              theo mailbox đã chọn)
             </p>
           ) : (
             <p className="customer-form__error" role="status">
               ⚠ Mailbox này chưa gắn customer. Hãy gán customer cho mailbox
-              trước để tránh mismatch.
+              trước để chọn destination.
             </p>
           )
         ) : null}
       </div>
 
       <div className="customer-form__field">
-        <label htmlFor="mapping-group-name" className="customer-form__label">
-          Telegram group name
+        <label htmlFor="mapping-destination" className="customer-form__label">
+          Telegram destination
         </label>
-        <input
-          id="mapping-group-name"
-          name="telegramGroupName"
-          type="text"
-          defaultValue={safeState.values.telegramGroupName}
-          placeholder="Client A verification group"
-          aria-invalid={errors.telegramGroupName ? "true" : undefined}
+        <select
+          id="mapping-destination"
+          name="destinationId"
+          value={selectedDestinationId}
+          onChange={(event) => setSelectedDestinationId(event.target.value)}
+          aria-invalid={errors.destinationId ? "true" : undefined}
           aria-describedby={
-            errors.telegramGroupName ? "mapping-group-name-error" : undefined
+            errors.destinationId
+              ? "mapping-destination-error"
+              : "mapping-destination-hint"
           }
           className="customer-form__input"
           required
-          maxLength={200}
-        />
-        {errors.telegramGroupName && (
-          <p id="mapping-group-name-error" className="customer-form__error">
-            {errors.telegramGroupName}
-          </p>
-        )}
-      </div>
-
-      <div className="customer-form__field">
-        <label htmlFor="mapping-chat-id" className="customer-form__label">
-          Telegram chat ID
-        </label>
-        <input
-          id="mapping-chat-id"
-          name="telegramChatId"
-          type="text"
-          defaultValue={safeState.values.telegramChatId}
-          placeholder="-1001234567890 or @channelusername"
-          aria-invalid={errors.telegramChatId ? "true" : undefined}
-          aria-describedby={
-            errors.telegramChatId
-              ? "mapping-chat-id-error"
-              : "mapping-chat-id-hint"
-          }
-          className="customer-form__input"
-          required
-          maxLength={64}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <p id="mapping-chat-id-hint" className="telegram-form__hint">
-          Use the numeric chat ID from Telegram. Never paste a bot token here.
+          disabled={!selectedMailbox?.customerId}
+        >
+          <option value="">
+            {selectedMailbox?.customerId
+              ? "Select a saved destination…"
+              : "Choose a mailbox first"}
+          </option>
+          {availableDestinations.map((destination) => {
+            const label = destination.telegramTopicName
+              ? `${destination.displayName} — ${destination.telegramGroupName} / ${destination.telegramTopicName}`
+              : `${destination.displayName} — ${destination.telegramGroupName}`;
+            return (
+              <option key={destination.id} value={destination.id}>
+                {destination.status === "ACTIVE" ? label : `${label} (disabled)`}
+              </option>
+            );
+          })}
+        </select>
+        <p id="mapping-destination-hint" className="telegram-form__hint">
+          Pick a destination saved for this customer. No need to re-enter chat or
+          topic IDs. Many mailboxes may share the same destination.
         </p>
-        {errors.telegramChatId && (
-          <p id="mapping-chat-id-error" className="customer-form__error">
-            {errors.telegramChatId}
+        {selectedMailbox?.customerId && availableDestinations.length === 0 ? (
+          <p className="customer-form__error" role="status">
+            No saved destinations for this customer yet. Create one in the
+            Destinations section above.
+          </p>
+        ) : null}
+        {errors.destinationId && (
+          <p id="mapping-destination-error" className="customer-form__error">
+            {errors.destinationId}
           </p>
         )}
-      </div>
-
-      <div className="customer-form__field">
-        <label htmlFor="mapping-topic-name" className="customer-form__label">
-          Telegram topic name <span className="telegram-form__optional">(optional)</span>
-        </label>
-        <input
-          id="mapping-topic-name"
-          name="telegramTopicName"
-          type="text"
-          defaultValue={safeState.values.telegramTopicName}
-          placeholder="Client A — verification topic"
-          aria-invalid={errors.telegramTopicName ? "true" : undefined}
-          aria-describedby={
-            errors.telegramTopicName ? "mapping-topic-name-error" : undefined
-          }
-          className="customer-form__input"
-          maxLength={200}
-        />
-        {errors.telegramTopicName && (
-          <p id="mapping-topic-name-error" className="customer-form__error">
-            {errors.telegramTopicName}
+        {selectedDestination ? (
+          <p className="telegram-form__hint">
+            Routing to <strong>{selectedDestination.telegramGroupName}</strong>
+            {selectedDestination.telegramTopicName
+              ? ` / ${selectedDestination.telegramTopicName}`
+              : ""}
+            .
           </p>
-        )}
-      </div>
-
-      <div className="customer-form__field">
-        <label htmlFor="mapping-thread-id" className="customer-form__label">
-          Telegram topic ID <span className="telegram-form__optional">(optional)</span>
-        </label>
-        <input
-          id="mapping-thread-id"
-          name="telegramThreadId"
-          type="text"
-          inputMode="numeric"
-          defaultValue={safeState.values.telegramThreadId}
-          placeholder="e.g. 42"
-          aria-invalid={errors.telegramThreadId ? "true" : undefined}
-          aria-describedby={
-            errors.telegramThreadId
-              ? "mapping-thread-id-error"
-              : "mapping-thread-id-hint"
-          }
-          className="customer-form__input"
-          maxLength={32}
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <p id="mapping-thread-id-hint" className="telegram-form__hint">
-          Leave blank to deliver to the main group. Set the topic (thread) ID to
-          route into a specific forum topic. Many mailboxes may share the same
-          group and topic.
-        </p>
-        {errors.telegramThreadId && (
-          <p id="mapping-thread-id-error" className="customer-form__error">
-            {errors.telegramThreadId}
-          </p>
-        )}
+        ) : null}
       </div>
 
       <div className="customer-form__field">

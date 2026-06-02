@@ -1,3 +1,11 @@
+import {
+  asString,
+  validateChatId,
+  validateOptionalThreadId,
+  validateOptionalTopicName,
+  validateRequiredName,
+} from './telegram-fields';
+
 export const TELEGRAM_MAPPING_STATUS_VALUES = ['ACTIVE', 'DISABLED'] as const;
 export type TelegramMappingStatus = (typeof TELEGRAM_MAPPING_STATUS_VALUES)[number];
 
@@ -29,27 +37,25 @@ export type TelegramMappingValidationResult =
   | { ok: true; data: TelegramMappingInput }
   | { ok: false; errors: TelegramMappingFieldErrors };
 
-const CHAT_ID_MAX = 64;
-const GROUP_NAME_MAX = 200;
-const TOPIC_NAME_MAX = 200;
-const THREAD_ID_MAX = 32;
-const CHAT_ID_PATTERN = /^-?[0-9]+$|^@[A-Za-z0-9_]{4,}$/;
-// Telegram forum topic / message_thread_id is a positive integer (a message id).
-const THREAD_ID_PATTERN = /^[1-9][0-9]*$/;
-// Bot tokens look like "123456:AAA..." — reject them so they never end up
-// stored as a chat ID through a copy/paste mistake.
-const BOT_TOKEN_LIKE = /\d+:[A-Za-z0-9_-]{10,}/;
-const SUSPICIOUS_GROUP_NAME = /\b(bot[_-]?token|token|secret|api[_-]?key)\b/i;
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
-}
-
-function isStatus(value: unknown): value is TelegramMappingStatus {
+export function isTelegramMappingStatus(
+  value: unknown,
+): value is TelegramMappingStatus {
   return (
     typeof value === 'string' &&
     (TELEGRAM_MAPPING_STATUS_VALUES as readonly string[]).includes(value)
   );
+}
+
+function readStatus(
+  raw: unknown,
+): { value: TelegramMappingStatus; error?: string } {
+  if (raw === undefined || raw === '' || raw === null) {
+    return { value: 'ACTIVE' };
+  }
+  if (isTelegramMappingStatus(raw)) {
+    return { value: raw };
+  }
+  return { value: 'ACTIVE', error: 'Status must be ACTIVE or DISABLED.' };
 }
 
 export function validateTelegramMappingInput(
@@ -62,66 +68,23 @@ export function validateTelegramMappingInput(
     errors.mailboxId = 'Mailbox is required.';
   }
 
-  const chatId = asString(raw.telegramChatId)?.trim() ?? '';
-  if (chatId.length === 0) {
-    errors.telegramChatId = 'Telegram chat ID is required.';
-  } else if (chatId.length > CHAT_ID_MAX) {
-    errors.telegramChatId = `Telegram chat ID must be ${CHAT_ID_MAX} characters or fewer.`;
-  } else if (BOT_TOKEN_LIKE.test(chatId)) {
-    errors.telegramChatId = 'Telegram chat ID must not contain a bot token.';
-  } else if (!CHAT_ID_PATTERN.test(chatId)) {
-    errors.telegramChatId =
-      'Telegram chat ID must be a numeric ID (e.g. -1001234567890) or @channel handle.';
-  }
+  const chatId = validateChatId(raw.telegramChatId);
+  if (chatId.error) errors.telegramChatId = chatId.error;
 
-  const groupName = asString(raw.telegramGroupName)?.trim() ?? '';
-  if (groupName.length === 0) {
-    errors.telegramGroupName = 'Telegram group name is required.';
-  } else if (groupName.length > GROUP_NAME_MAX) {
-    errors.telegramGroupName = `Telegram group name must be ${GROUP_NAME_MAX} characters or fewer.`;
-  } else if (BOT_TOKEN_LIKE.test(groupName) || SUSPICIOUS_GROUP_NAME.test(groupName)) {
-    errors.telegramGroupName = 'Telegram group name must not contain secrets or tokens.';
-  }
+  const groupName = validateRequiredName(
+    raw.telegramGroupName,
+    'Telegram group name',
+  );
+  if (groupName.error) errors.telegramGroupName = groupName.error;
 
-  // Optional forum-topic thread id. Empty/undefined → null (plain group send).
-  let threadId: string | null = null;
-  const rawThreadId = asString(raw.telegramThreadId)?.trim() ?? '';
-  if (rawThreadId.length > 0) {
-    if (rawThreadId.length > THREAD_ID_MAX) {
-      errors.telegramThreadId = `Telegram topic ID must be ${THREAD_ID_MAX} characters or fewer.`;
-    } else if (!THREAD_ID_PATTERN.test(rawThreadId)) {
-      errors.telegramThreadId =
-        'Telegram topic ID must be a positive number (the topic/thread message id).';
-    } else {
-      threadId = rawThreadId;
-    }
-  }
+  const threadId = validateOptionalThreadId(raw.telegramThreadId);
+  if (threadId.error) errors.telegramThreadId = threadId.error;
 
-  // Optional human-readable topic label. Display only — it never routes.
-  let topicName: string | null = null;
-  const rawTopicName = asString(raw.telegramTopicName)?.trim() ?? '';
-  if (rawTopicName.length > 0) {
-    if (rawTopicName.length > TOPIC_NAME_MAX) {
-      errors.telegramTopicName = `Telegram topic name must be ${TOPIC_NAME_MAX} characters or fewer.`;
-    } else if (
-      BOT_TOKEN_LIKE.test(rawTopicName) ||
-      SUSPICIOUS_GROUP_NAME.test(rawTopicName)
-    ) {
-      errors.telegramTopicName =
-        'Telegram topic name must not contain secrets or tokens.';
-    } else {
-      topicName = rawTopicName;
-    }
-  }
+  const topicName = validateOptionalTopicName(raw.telegramTopicName);
+  if (topicName.error) errors.telegramTopicName = topicName.error;
 
-  let status: TelegramMappingStatus = 'ACTIVE';
-  if (raw.status === undefined || raw.status === '' || raw.status === null) {
-    status = 'ACTIVE';
-  } else if (isStatus(raw.status)) {
-    status = raw.status;
-  } else {
-    errors.status = 'Status must be ACTIVE or DISABLED.';
-  }
+  const status = readStatus(raw.status);
+  if (status.error) errors.status = status.error;
 
   if (Object.keys(errors).length > 0) {
     return { ok: false, errors };
@@ -131,11 +94,68 @@ export function validateTelegramMappingInput(
     ok: true,
     data: {
       mailboxId,
-      telegramChatId: chatId,
-      telegramGroupName: groupName,
-      telegramThreadId: threadId,
-      telegramTopicName: topicName,
-      status,
+      telegramChatId: chatId.value,
+      telegramGroupName: groupName.value,
+      telegramThreadId: threadId.value,
+      telegramTopicName: topicName.value,
+      status: status.value,
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// TASK-053 — destination-based mapping input.
+//
+// The new UI no longer asks the operator to re-type chat/thread details: they
+// pick a mailbox and a saved TelegramDestination. The chat/group/thread/topic
+// are derived server-side from the destination, so this input only carries the
+// three fields the operator actually chooses.
+// ---------------------------------------------------------------------------
+
+export interface TelegramDestinationMappingInput {
+  mailboxId: string;
+  destinationId: string;
+  status: TelegramMappingStatus;
+}
+
+export interface RawTelegramDestinationMappingInput {
+  mailboxId?: unknown;
+  destinationId?: unknown;
+  status?: unknown;
+}
+
+export type TelegramDestinationMappingFieldErrors = Partial<
+  Record<keyof TelegramDestinationMappingInput, string>
+>;
+
+export type TelegramDestinationMappingValidationResult =
+  | { ok: true; data: TelegramDestinationMappingInput }
+  | { ok: false; errors: TelegramDestinationMappingFieldErrors };
+
+export function validateTelegramDestinationMappingInput(
+  raw: RawTelegramDestinationMappingInput,
+): TelegramDestinationMappingValidationResult {
+  const errors: TelegramDestinationMappingFieldErrors = {};
+
+  const mailboxId = asString(raw.mailboxId)?.trim() ?? '';
+  if (mailboxId.length === 0) {
+    errors.mailboxId = 'Mailbox is required.';
+  }
+
+  const destinationId = asString(raw.destinationId)?.trim() ?? '';
+  if (destinationId.length === 0) {
+    errors.destinationId = 'Telegram destination is required.';
+  }
+
+  const status = readStatus(raw.status);
+  if (status.error) errors.status = status.error;
+
+  if (Object.keys(errors).length > 0) {
+    return { ok: false, errors };
+  }
+
+  return {
+    ok: true,
+    data: { mailboxId, destinationId, status: status.value },
   };
 }

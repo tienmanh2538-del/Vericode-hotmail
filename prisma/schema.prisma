@@ -75,9 +75,10 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  createdMailboxes        Mailbox[]         @relation("MailboxCreatedBy")
-  createdTelegramMappings TelegramMapping[] @relation("TelegramMappingCreatedBy")
-  auditLogs               AuditLog[]
+  createdMailboxes            Mailbox[]             @relation("MailboxCreatedBy")
+  createdTelegramMappings     TelegramMapping[]     @relation("TelegramMappingCreatedBy")
+  createdTelegramDestinations TelegramDestination[] @relation("TelegramDestinationCreatedBy")
+  auditLogs                   AuditLog[]
 
   // TASK-045 — internal staff ownership. A STAFF_READ_ONLY user only sees the
   // customers (and their mailboxes) assigned to them here. OWNER/ADMIN ignore
@@ -97,6 +98,9 @@ model Customer {
   mailboxes        Mailbox[]
   // TASK-045 — staff assigned to operate this customer (and its mailboxes).
   staffAssignments StaffAssignment[]
+  // TASK-053 — reusable Telegram destinations are scoped to a customer so a
+  // mailbox can only ever be mapped to its own customer's group/topic.
+  telegramDestinations TelegramDestination[]
 }
 
 model Mailbox {
@@ -148,6 +152,14 @@ model TelegramMapping {
   telegramThreadId  String?
   telegramTopicName String?
   status            TelegramMappingStatus @default(ACTIVE)
+  // TASK-053 — optional link to a reusable TelegramDestination. Additive and
+  // nullable: legacy mappings created before TASK-053 keep `destinationId = null`
+  // and route from their own snapshot columns above. When a mapping IS linked,
+  // the resolve pipeline reads the live destination (and skips sending when the
+  // destination is DISABLED). The chat/group/thread/topic columns are still
+  // written as a snapshot so the @@unique below and the existing UI keep working.
+  destinationId     String?
+  destination       TelegramDestination?  @relation(fields: [destinationId], references: [id], onDelete: SetNull)
   createdById       String?
   createdBy         User?                 @relation("TelegramMappingCreatedBy", fields: [createdById], references: [id])
   createdAt         DateTime              @default(now())
@@ -160,6 +172,44 @@ model TelegramMapping {
   @@unique([mailboxId, telegramChatId])
   // Speeds up "how many mailboxes route to this destination" lookups for the UI.
   @@index([telegramChatId])
+  @@index([status])
+  @@index([destinationId])
+}
+
+// TASK-053 — Reusable Telegram destination.
+//
+// A destination is a saved Telegram group (or a forum topic inside a group) that
+// Admin/Owner configure ONCE and then reuse when mapping mailboxes. It is scoped
+// to a Customer so a mailbox can only ever be mapped to its own customer's
+// destinations (cross-customer isolation is enforced in the service layer).
+//
+// Many mailboxes may share one destination (TASK-041 routing rule is preserved):
+// there is deliberately NO unique constraint tying a destination to a single
+// mailbox. "No duplicate destination within a customer for the same chat/thread"
+// is enforced in the service layer (Postgres treats NULL thread ids as distinct,
+// so a DB unique cannot cover the plain-group case reliably).
+//
+// SECURITY: only chat/thread IDs and human labels are stored here — never a bot
+// token (tokens live in env, see docs/SECURITY_RULES.md §3).
+model TelegramDestination {
+  id                String                @id @default(cuid())
+  customerId        String
+  customer          Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  // Operator-facing label so a destination is easy to recognise in dropdowns.
+  displayName       String
+  telegramGroupName String
+  telegramTopicName String?
+  telegramChatId    String
+  telegramThreadId  String?
+  status            TelegramMappingStatus @default(ACTIVE)
+  createdById       String?
+  createdBy         User?                 @relation("TelegramDestinationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  mappings TelegramMapping[]
+
+  @@index([customerId])
   @@index([status])
 }
 

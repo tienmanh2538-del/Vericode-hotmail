@@ -22,6 +22,8 @@ describe('prisma/schema.prisma', () => {
       'Customer',
       'Mailbox',
       'TelegramMapping',
+      // TASK-053 — reusable, customer-scoped Telegram destination.
+      'TelegramDestination',
       'GraphSubscription',
       'ProcessedMessage',
       'AuditLog',
@@ -106,6 +108,15 @@ describe('prisma/schema.prisma', () => {
       expect(schema).toContain('clientStateHash');
       expect(schema).not.toMatch(/\bclientState\s+String/);
     });
+  });
+
+  it('TelegramDestination is customer-scoped and TelegramMapping links to it (TASK-053)', () => {
+    const dest = schema.match(/model TelegramDestination\s*\{([\s\S]*?)^\}/m)?.[1] ?? '';
+    expect(dest).toMatch(/customerId\s+String/);
+    expect(dest).toContain('telegramChatId');
+    // The link from a mapping to a reusable destination is additive + nullable.
+    const mapping = schema.match(/model TelegramMapping\s*\{([\s\S]*?)^\}/m)?.[1] ?? '';
+    expect(mapping).toMatch(/destinationId\s+String\?/);
   });
 
   it('has dedup unique constraint on (mailboxId, graphMessageId)', () => {

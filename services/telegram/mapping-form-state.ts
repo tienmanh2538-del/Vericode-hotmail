@@ -1,15 +1,15 @@
-import type { TelegramMappingFieldErrors } from '@/lib/validation/telegram-mapping';
+import type { TelegramMappingFormField } from './telegram-mapping.service';
 
+// TASK-053 — the mapping form now selects a saved destination instead of asking
+// the operator to re-type chat/thread details. The form state therefore tracks
+// the mailbox, the chosen destination, and the status only.
 export interface TelegramMappingFormState {
   status: 'idle' | 'error';
-  errors?: TelegramMappingFieldErrors;
+  errors?: Partial<Record<TelegramMappingFormField, string>>;
   formError?: string;
   values: {
     mailboxId: string;
-    telegramChatId: string;
-    telegramGroupName: string;
-    telegramThreadId: string;
-    telegramTopicName: string;
+    destinationId: string;
     status: string;
   };
 }
@@ -18,10 +18,7 @@ export const INITIAL_TELEGRAM_MAPPING_FORM_STATE: TelegramMappingFormState = {
   status: 'idle',
   values: {
     mailboxId: '',
-    telegramChatId: '',
-    telegramGroupName: '',
-    telegramThreadId: '',
-    telegramTopicName: '',
+    destinationId: '',
     status: 'ACTIVE',
   },
 };
