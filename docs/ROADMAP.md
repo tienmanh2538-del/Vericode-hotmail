@@ -179,7 +179,7 @@ Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-0
 - TASK-048: Choose deployment platform & staging architecture — quyết định: Railway (khuyến nghị), Render (dự phòng), Vercel-only không phù hợp do worker long-running. Xem `docs/reports/TASK-048-choose-deployment-platform-staging-architecture.md`.
 - TASK-049: Staging infrastructure setup
 - TASK-050: Microsoft App Registration staging validation — done. Đã xác minh ở mức docs/checklist: App Registration staging riêng, Redirect URI + Webhook URL staging (placeholder), permission tối thiểu (Mail.Read, offline_access, User.Read), an toàn client secret. Xem `docs/tasks/TASK-050-microsoft-app-registration-staging-validation.md`, `docs/reports/TASK-050-microsoft-app-registration-staging-validation.md`. Rủi ro còn lại: chưa chạy live mailbox E2E → để TASK-051.
-- TASK-051: Staging live mailbox E2E test — trước khi chạy live E2E (mailbox test + Telegram test group), đọc `docs/MICROSOFT_SETUP.md`, `docs/STAGING_DEPLOYMENT.md`, và task/report TASK-050.
+- TASK-051: Staging live mailbox E2E test — **pre-live staging validation pass (conditional)**. Đã PASS trên staging: login/logout, /admin/health smoke check, customer + mailbox assignment UI, Telegram mapping UI + test-send, Mock Email dropdown + Process & send to Telegram, API scope check cho mock-email process. Live Microsoft email path (webhook / delta polling / duplicate bằng email thật) **deferred** sang internal beta / product trial vì hiện chưa có email thật phù hợp. Xem `docs/reports/TASK-051-staging-live-mailbox-e2e-test.md` (mục 6 + 6.1). Trước khi chạy phần live còn lại, đọc `docs/MICROSOFT_SETUP.md`, `docs/STAGING_DEPLOYMENT.md`, và task/report TASK-050.
 
 ## Sprint 13 — Scale readiness
 
