@@ -22,22 +22,28 @@ const logger = createLogger();
 
 const SESSION_MAX_AGE_SECONDS = Math.floor(STAGING_SESSION_TTL_MS / 1000);
 
-function redirect(request: NextRequest, path: string): NextResponse {
+function redirect(baseUrl: string, path: string): NextResponse {
+  // Anchor the redirect to the configured public base URL (APP_URL), NOT to
+  // request.url. Behind Railway's proxy the app binds to an internal port, so
+  // request.url resolves to http://localhost:8080 — redirecting there sends the
+  // browser to a dead address (ERR_CONNECTION_REFUSED). APP_URL is the canonical
+  // public origin (the staging HTTPS domain), so redirects must derive from it.
   // 303 converts the POST into a GET so the browser navigates cleanly.
-  return NextResponse.redirect(new URL(path, request.url), 303);
+  return NextResponse.redirect(new URL(path, baseUrl), 303);
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const { values } = loadEnv();
+  const baseUrl = values.APP_URL;
 
   // Staging login is only available on staging. Other envs fall through to the
   // normal /login page (dev demo flag / production auth).
   if (values.APP_ENV !== 'staging') {
-    return redirect(request, '/login');
+    return redirect(baseUrl, '/login');
   }
   if (!isStagingAdminConfigured(values)) {
     // Fail-closed: no passphrase / no signing secret ⇒ admin stays locked.
-    return redirect(request, '/login?error=unconfigured');
+    return redirect(baseUrl, '/login?error=unconfigured');
   }
 
   let password = '';
@@ -46,21 +52,21 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const value = form.get('password');
     password = typeof value === 'string' ? value : '';
   } catch {
-    return redirect(request, '/login?error=invalid');
+    return redirect(baseUrl, '/login?error=invalid');
   }
 
   if (!verifyStagingPassword(password, values)) {
     // No password / token / env value is logged — only the failure event.
     logger.warn('Staging admin login attempt rejected');
-    return redirect(request, '/login?error=invalid');
+    return redirect(baseUrl, '/login?error=invalid');
   }
 
   const token = createStagingSessionToken(values);
   if (token === null) {
-    return redirect(request, '/login?error=unconfigured');
+    return redirect(baseUrl, '/login?error=unconfigured');
   }
 
-  const response = redirect(request, '/admin');
+  const response = redirect(baseUrl, '/admin');
   response.cookies.set(STAGING_SESSION_COOKIE, token, {
     httpOnly: true,
     secure: true,
