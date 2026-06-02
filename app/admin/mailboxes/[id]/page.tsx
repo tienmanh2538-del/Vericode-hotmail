@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { MailboxCustomerAssignForm } from '@/components/admin/MailboxCustomerAssignForm';
+import { MailboxDisconnectForm } from '@/components/admin/MailboxDisconnectForm';
 import { MailboxReadinessBadge } from '@/components/status/MailboxReadinessBadge';
 import { MailboxStatusBadge } from '@/components/status/MailboxStatusBadge';
 import { SubscriptionStatusBadge } from '@/components/status/SubscriptionStatusBadge';
@@ -16,6 +17,8 @@ import {
 import { listCustomers } from '@/services/customers/customer.service';
 import { assignMailboxCustomerAction } from '@/services/microsoft/mailbox-assign-actions';
 import type { AssignMailboxCustomerState } from '@/services/microsoft/mailbox-assign-form-state';
+import { disconnectMailboxAction } from '@/services/microsoft/mailbox-disconnect-actions';
+import type { DisconnectMailboxState } from '@/services/microsoft/mailbox-disconnect-form-state';
 import {
   getMailboxDetailById,
   type MailboxDetail,
@@ -141,6 +144,15 @@ export default async function MailboxDetailPage({
     null,
     mailbox.id,
   );
+  // TASK-052 — disconnecting a mailbox is OWNER/ADMIN only (MANAGE_MAILBOXES).
+  const disconnectAction: (
+    state: DisconnectMailboxState,
+    formData: FormData,
+  ) => Promise<DisconnectMailboxState> = disconnectMailboxAction.bind(
+    null,
+    mailbox.id,
+  );
+  const isDisconnected = mailbox.status === 'DISABLED';
 
   const customerLabel =
     mailbox.customerName ?? mailbox.ownerCustomerName ?? '—';
@@ -277,6 +289,19 @@ export default async function MailboxDetailPage({
             action={assignCustomerAction}
             customers={assignableCustomers}
             currentCustomerId={mailbox.customerId}
+          />
+        </section>
+      ) : null}
+
+      {canManageMailbox ? (
+        <section
+          className="mailbox-detail__section mailbox-detail__section--danger"
+          aria-label="Ngắt kết nối mailbox"
+        >
+          <h3 className="mailbox-detail__section-title">Ngắt kết nối mailbox</h3>
+          <MailboxDisconnectForm
+            action={disconnectAction}
+            alreadyDisconnected={isDisconnected}
           />
         </section>
       ) : null}
