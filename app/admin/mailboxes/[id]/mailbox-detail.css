@@ -7,6 +7,18 @@
   flex-wrap: wrap;
 }
 
+/* TASK-051 — assign-customer form feedback. */
+.mailbox-assign-form {
+  max-width: 28rem;
+}
+
+.mailbox-assign-form__success {
+  margin: 0 0 0.5rem;
+  color: #1a7f37;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .mailbox-detail__heading {
   margin: 0;
   font-size: 1.5rem;

@@ -1,10 +1,34 @@
 import { MockEmailForm } from "@/components/forms/MockEmailForm";
+import { resolveCustomerScope } from "@/lib/auth/access-scope";
+import { requireAdminAccess } from "@/lib/auth/guards";
+import { createLogger } from "@/lib/logger";
+import {
+  listMockEmailMailboxOptions,
+  type MockEmailMailboxOption,
+} from "@/services/microsoft/mock-email-mailbox-options.service";
 import "../customers/customers.css";
 import "./mock-email.css";
 
 export const dynamic = "force-dynamic";
 
-export default function MockEmailPage() {
+const logger = createLogger({ level: "warn" });
+
+export default async function MockEmailPage() {
+  // Mock email is an admin testing tool; scope the mailbox list so STAFF only
+  // sees their assigned mailboxes (consistent with the rest of /admin).
+  const user = await requireAdminAccess();
+  const scope = await resolveCustomerScope(user);
+
+  let mailboxes: MockEmailMailboxOption[] = [];
+  try {
+    mailboxes = await listMockEmailMailboxOptions(scope);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    logger.error("Failed to load mailbox options for /admin/mock-email", {
+      errorMessage: message,
+    });
+  }
+
   return (
     <>
       <div className="customers-header">
@@ -23,7 +47,7 @@ export default function MockEmailPage() {
       </div>
 
       <section className="telegram-section" aria-label="Mock email form">
-        <MockEmailForm />
+        <MockEmailForm mailboxes={mailboxes} />
       </section>
     </>
   );

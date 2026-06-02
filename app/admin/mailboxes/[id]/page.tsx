@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { MailboxCustomerAssignForm } from '@/components/admin/MailboxCustomerAssignForm';
 import { MailboxReadinessBadge } from '@/components/status/MailboxReadinessBadge';
 import { MailboxStatusBadge } from '@/components/status/MailboxStatusBadge';
 import { SubscriptionStatusBadge } from '@/components/status/SubscriptionStatusBadge';
@@ -12,6 +13,9 @@ import {
   deriveMailboxReadiness,
   mailboxHasCustomer,
 } from '@/lib/mailboxes/mailbox-list-filter';
+import { listCustomers } from '@/services/customers/customer.service';
+import { assignMailboxCustomerAction } from '@/services/microsoft/mailbox-assign-actions';
+import type { AssignMailboxCustomerState } from '@/services/microsoft/mailbox-assign-form-state';
 import {
   getMailboxDetailById,
   type MailboxDetail,
@@ -121,6 +125,22 @@ export default async function MailboxDetailPage({
   // STAFF_READ_ONLY sees the same readiness state but no management CTA. The
   // backend mapping actions stay guarded regardless of this UI hiding.
   const canManageMappings = hasPermission(user.role, 'MANAGE_TELEGRAM_MAPPINGS');
+  // TASK-051 — assigning a mailbox to a customer is a MANAGE_MAILBOXES action.
+  // Customers are loaded within the viewer's scope so STAFF never sees others.
+  const canManageMailbox = hasPermission(user.role, 'MANAGE_MAILBOXES');
+  const assignableCustomers = canManageMailbox
+    ? (await listCustomers(scope)).map((customer) => ({
+        id: customer.id,
+        name: customer.name,
+      }))
+    : [];
+  const assignCustomerAction: (
+    state: AssignMailboxCustomerState,
+    formData: FormData,
+  ) => Promise<AssignMailboxCustomerState> = assignMailboxCustomerAction.bind(
+    null,
+    mailbox.id,
+  );
 
   const customerLabel =
     mailbox.customerName ?? mailbox.ownerCustomerName ?? '—';
@@ -245,6 +265,21 @@ export default async function MailboxDetailPage({
           </p>
         ) : null}
       </section>
+
+      {canManageMailbox ? (
+        <section className="mailbox-detail__section" aria-label="Gán customer">
+          <h3 className="mailbox-detail__section-title">Gán customer</h3>
+          <p className="mailbox-detail__muted">
+            Hiện tại: <strong>{customerLabel}</strong>. Chọn customer để gắn
+            mailbox này (hoặc bỏ trống để gỡ gán).
+          </p>
+          <MailboxCustomerAssignForm
+            action={assignCustomerAction}
+            customers={assignableCustomers}
+            currentCustomerId={mailbox.customerId}
+          />
+        </section>
+      ) : null}
 
       <section
         className="mailbox-detail__section"

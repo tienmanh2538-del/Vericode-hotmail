@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import type {
   MockEmailFieldErrors,
   MockEmailSafePreview,
 } from "@/lib/validation/mock-email";
+import type { MockEmailMailboxOption } from "@/services/microsoft/mock-email-mailbox-options.service";
 
 interface MockEmailFormValues {
   mailboxEmail: string;
@@ -98,7 +99,11 @@ function buildPayload(values: MockEmailFormValues) {
   };
 }
 
-export function MockEmailForm() {
+interface MockEmailFormProps {
+  mailboxes: MockEmailMailboxOption[];
+}
+
+export function MockEmailForm({ mailboxes }: MockEmailFormProps) {
   const [values, setValues] = useState<MockEmailFormValues>(EMPTY_VALUES);
   const [errors, setErrors] = useState<MockEmailFieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -107,6 +112,16 @@ export function MockEmailForm() {
   const [sending, setSending] = useState(false);
   const [processResult, setProcessResult] = useState<ProcessResult | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
+
+  // TASK-051 — the chosen mailbox drives the customer + active-mapping preview
+  // so the operator can see where a code would land before sending.
+  const selectedMailbox = useMemo(
+    () =>
+      mailboxes.find(
+        (mailbox) => mailbox.emailAddress === values.mailboxEmail,
+      ) ?? null,
+    [mailboxes, values.mailboxEmail],
+  );
 
   function update<K extends keyof MockEmailFormValues>(
     key: K,
@@ -203,29 +218,67 @@ export function MockEmailForm() {
 
         <div className="customer-form__field">
           <label htmlFor="mock-mailbox-email" className="customer-form__label">
-            Mailbox email
+            Mailbox
           </label>
-          <input
-            id="mock-mailbox-email"
-            name="mailboxEmail"
-            type="email"
-            value={values.mailboxEmail}
-            onChange={(event) => update("mailboxEmail", event.target.value)}
-            aria-invalid={errors.mailboxEmail ? "true" : undefined}
-            aria-describedby={
-              errors.mailboxEmail ? "mock-mailbox-email-error" : undefined
-            }
-            className="customer-form__input"
-            placeholder="customer-mailbox@example.com"
-            autoComplete="off"
-            required
-            maxLength={254}
-          />
+          {mailboxes.length === 0 ? (
+            <p className="telegram-form__hint" role="status">
+              Chưa có mailbox nào được kết nối. Hãy connect một mailbox
+              Hotmail/Outlook trước khi gửi mock email.
+            </p>
+          ) : (
+            <select
+              id="mock-mailbox-email"
+              name="mailboxEmail"
+              value={values.mailboxEmail}
+              onChange={(event) => update("mailboxEmail", event.target.value)}
+              aria-invalid={errors.mailboxEmail ? "true" : undefined}
+              aria-describedby={
+                errors.mailboxEmail ? "mock-mailbox-email-error" : undefined
+              }
+              className="customer-form__input"
+              required
+            >
+              <option value="">Chọn mailbox…</option>
+              {mailboxes.map((mailbox) => (
+                <option key={mailbox.emailAddress} value={mailbox.emailAddress}>
+                  {mailbox.customerName
+                    ? `${mailbox.emailAddress} — ${mailbox.customerName}`
+                    : mailbox.emailAddress}
+                </option>
+              ))}
+            </select>
+          )}
           {errors.mailboxEmail && (
             <p id="mock-mailbox-email-error" className="customer-form__error">
               {errors.mailboxEmail}
             </p>
           )}
+
+          {selectedMailbox ? (
+            <div
+              className={`mock-email-mapping mock-email-mapping--${
+                selectedMailbox.hasActiveMapping ? "ready" : "warn"
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              <p className="mock-email-mapping__row">
+                Customer:{" "}
+                <strong>{selectedMailbox.customerName ?? "Chưa gán"}</strong>
+              </p>
+              {selectedMailbox.hasActiveMapping ? (
+                <p className="mock-email-mapping__row">
+                  Telegram:{" "}
+                  <strong>{selectedMailbox.destinationLabel}</strong>
+                </p>
+              ) : (
+                <p className="mock-email-mapping__row mock-email-mapping__row--warn">
+                  ⚠ Needs Mapping — mailbox chưa có active Telegram destination.
+                  Code sẽ bị skip (SKIPPED_NO_TELEGRAM_MAPPING).
+                </p>
+              )}
+            </div>
+          ) : null}
         </div>
 
         <div className="customer-form__field">

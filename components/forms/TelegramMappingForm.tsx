@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { useFormState, useFormStatus } from "react-dom";
 import { TELEGRAM_MAPPING_STATUS_VALUES } from "@/lib/validation/telegram-mapping";
 import {
@@ -68,6 +69,15 @@ export function TelegramMappingForm({
   const safeState = state ?? initial;
   const errors = safeState.errors ?? {};
 
+  // TASK-051 — track the selected mailbox so the operator sees which customer
+  // the code will be routed to. Customer is derived from the chosen mailbox
+  // (never selected independently) to avoid a customer/mailbox mismatch.
+  const [selectedMailboxId, setSelectedMailboxId] = useState(
+    initial.values.mailboxId,
+  );
+  const selectedMailbox =
+    mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) ?? null;
+
   if (mailboxes.length === 0) {
     return (
       <p className="telegram-form__empty">
@@ -91,7 +101,8 @@ export function TelegramMappingForm({
         <select
           id="mapping-mailbox"
           name="mailboxId"
-          defaultValue={safeState.values.mailboxId}
+          value={selectedMailboxId}
+          onChange={(event) => setSelectedMailboxId(event.target.value)}
           aria-invalid={errors.mailboxId ? "true" : undefined}
           aria-describedby={errors.mailboxId ? "mapping-mailbox-error" : undefined}
           className="customer-form__input"
@@ -114,6 +125,20 @@ export function TelegramMappingForm({
             {errors.mailboxId}
           </p>
         )}
+        {selectedMailbox ? (
+          selectedMailbox.customerName ? (
+            <p className="telegram-form__hint">
+              Customer:{" "}
+              <strong>{selectedMailbox.customerName}</strong>{" "}
+              (tự động theo mailbox đã chọn)
+            </p>
+          ) : (
+            <p className="customer-form__error" role="status">
+              ⚠ Mailbox này chưa gắn customer. Hãy gán customer cho mailbox
+              trước để tránh mismatch.
+            </p>
+          )
+        ) : null}
       </div>
 
       <div className="customer-form__field">

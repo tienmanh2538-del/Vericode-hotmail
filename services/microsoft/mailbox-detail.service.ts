@@ -20,6 +20,9 @@ export interface MailboxDetailMailbox {
   emailAddress: string;
   provider: MailboxProviderValue;
   status: MailboxStatusValue;
+  // TASK-051 — the customer FK id (not a secret) so the detail page can
+  // preselect the "assign customer" dropdown. `customerName` stays the label.
+  customerId: string | null;
   ownerCustomerName: string | null;
   customerName: string | null;
   tokenLastRefreshedAt: Date | null;
@@ -109,8 +112,9 @@ export async function getMailboxDetailById(
       emailAddress: true,
       provider: true,
       status: true,
-      // TASK-045 — selected only to enforce the staff scope guard below; it is
-      // never copied into the returned MailboxDetail.
+      // TASK-045 — used to enforce the staff scope guard below. TASK-051 also
+      // copies it into the returned MailboxDetail so the assign-customer
+      // dropdown can preselect the current customer (the FK id is not a secret).
       customerId: true,
       ownerCustomerName: true,
       tokenLastRefreshedAt: true,
@@ -176,6 +180,7 @@ export async function getMailboxDetailById(
       emailAddress: row.emailAddress,
       provider: row.provider as MailboxProviderValue,
       status: row.status as MailboxStatusValue,
+      customerId: row.customerId,
       ownerCustomerName: row.ownerCustomerName,
       customerName: row.customer?.name ?? null,
       tokenLastRefreshedAt: row.tokenLastRefreshedAt,

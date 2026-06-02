@@ -102,3 +102,32 @@
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* TASK-051 — customer + active-mapping preview for the selected mailbox. */
+.mock-email-mapping {
+  margin-top: 0.5rem;
+  border: 1px solid #d0d7de;
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  background: #f6f8fa;
+}
+
+.mock-email-mapping--ready {
+  border-left-color: #1a7f37;
+  background: #eef9f0;
+}
+
+.mock-email-mapping--warn {
+  border-left-color: #9a6700;
+  background: #fff8e6;
+}
+
+.mock-email-mapping__row {
+  margin: 0.15rem 0;
+  font-size: 0.85rem;
+}
+
+.mock-email-mapping__row--warn {
+  color: #9a6700;
+}
