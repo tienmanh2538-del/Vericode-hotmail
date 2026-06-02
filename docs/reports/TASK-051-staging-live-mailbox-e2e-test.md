@@ -27,6 +27,7 @@ ghi tên biến môi trường và placeholder, không ghi giá trị thật.
 |---|---|---|
 | Task file TASK-051 đúng scope | ✅ Đã có | `docs/tasks/TASK-051-staging-live-mailbox-e2e-test.md` |
 | Xác minh sẵn sàng trong repo | ✅ Đã đủ | Mục 3 report này |
+| Blocker pre-live (runtime/UI) đã sửa | ✅ Đã sửa | Mục 3.1 report này |
 | Checklist hạ tầng staging (TASK-049) | ⏳ User xác nhận | Railway dashboard — mục 5.1 |
 | Checklist App Registration staging (TASK-050) | ⏳ User xác nhận | Microsoft Entra — mục 5.2 |
 | Live E2E webhook path | ⏳ Chưa chạy | Bảng kết quả mục 6 |
@@ -107,6 +108,31 @@ SUBSCRIPTION_RENEWAL_ENABLED
 SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS
 SUBSCRIPTION_RENEWAL_WINDOW_HOURS
 ```
+
+---
+
+## 3.1. Blocker pre-live đã phát hiện & sửa (TASK-051)
+
+Trong giai đoạn pre-live staging validation (trước khi chạy live mailbox E2E), một số
+runtime/UI blocker đã được phát hiện và **đã sửa trong repo** để luồng vận hành thật
+chạy được. Đây là các fix tối thiểu, không redesign, không đổi business rule/routing:
+
+```text
+[x] Staging login redirect anchored to APP_URL
+    -> sau đăng nhập staging, redirect bám theo APP_URL thay vì host suy đoán,
+       tránh OAuth/redirect trỏ nhầm domain.
+[x] Mailbox customer assignment UI
+    -> mailbox detail cho phép gán mailbox vào đúng customer (theo scope viewer).
+[x] Telegram mapping hiển thị Customer theo mailbox được chọn
+    -> form mapping hiển thị đúng customer của mailbox đang chọn, giảm gán nhầm.
+[x] Mock Email mailbox dropdown + mapping preview
+    -> trang Mock Email chọn mailbox theo scope + preview destination mapping;
+       API /api/mock-email/process tự xác minh mailbox thuộc scope viewer (fail-closed).
+```
+
+Lưu ý: các fix trên giúp luồng pre-live chạy được, **không** đồng nghĩa live E2E đã PASS.
+**Live mailbox E2E vẫn đang pending** — kết quả cuối chỉ điền vào bảng mục 6 sau khi
+user chạy thật trên staging (xem mục 1 và mục 6). `docs/ROADMAP.md` vì vậy chưa đánh done.
 
 ---
 
