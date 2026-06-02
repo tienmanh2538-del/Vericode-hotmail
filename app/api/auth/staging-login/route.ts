@@ -70,7 +70,14 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   response.cookies.set(STAGING_SESSION_COOKIE, token, {
     httpOnly: true,
     secure: true,
-    sameSite: 'strict',
+    // Lax, not Strict: the Microsoft OAuth flow ends with a cross-site top-level
+    // redirect (login.microsoftonline.com → our callback → /admin). A Strict
+    // cookie is withheld on the request that lands after a cross-site
+    // navigation, so the admin guard would see no session and bounce the user
+    // back to /login even though the mailbox was connected. Lax still ships the
+    // cookie only on top-level GET navigations (not cross-site POSTs or
+    // sub-resource requests), which is the correct posture for this gate.
+    sameSite: 'lax',
     path: '/',
     maxAge: SESSION_MAX_AGE_SECONDS,
   });

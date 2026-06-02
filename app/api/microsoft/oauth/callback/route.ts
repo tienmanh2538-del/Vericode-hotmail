@@ -64,7 +64,12 @@ function buildRedirect(
   // so request.url resolves to http://localhost:8080 — redirecting there sends
   // the browser to a dead address (ERR_CONNECTION_REFUSED) even though the
   // mailbox was already persisted. Same fix as the staging login/logout routes.
-  const target = new URL('/admin', env.APP_URL);
+  //
+  // Success lands on /admin/mailboxes so the freshly connected mailbox is
+  // visible in the list immediately; errors land on the /admin dashboard, which
+  // renders the reason banner from the `oauth`/`reason` query params.
+  const path = status === 'success' ? '/admin/mailboxes' : '/admin';
+  const target = new URL(path, env.APP_URL);
   target.searchParams.set('oauth', status);
   if (reason) target.searchParams.set('reason', reason);
   const response = NextResponse.redirect(target);
