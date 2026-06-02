@@ -60,6 +60,39 @@ const STRONG_KEYWORDS_VI: readonly string[] = [
 const WEAK_KEYWORDS_EN: readonly string[] = ['code'];
 const WEAK_KEYWORDS_VI: readonly string[] = ['mã'];
 
+// Brand / verification-intent words. In a real Facebook/Meta email the security
+// framing ("verify your Facebook account for security") is often phrased around
+// the code rather than as the exact "<x> code" bigram the strong list expects.
+// This mirrors the trusted vocabulary the upstream detector already accepts, so
+// an email the detector treats as Facebook verification is not then rejected by
+// the extractor purely for lacking an adjacent keyword phrase. It is a modest
+// fallback signal, only applied near the candidate and only when no strong
+// keyword matched — it cannot, on its own, push noise over the threshold.
+const BRAND_CONTEXT_KEYWORDS_EN: readonly string[] = [
+  'facebook',
+  'meta',
+  'instagram',
+  'verify',
+  'verification',
+  'security',
+  'confirm',
+  'confirmation',
+  'login',
+  'sign in',
+  'sign-in',
+  'two-factor',
+  'two factor',
+  '2fa',
+];
+
+const BRAND_CONTEXT_KEYWORDS_VI: readonly string[] = [
+  'xác minh',
+  'xác nhận',
+  'xác thực',
+  'bảo mật',
+  'đăng nhập',
+];
+
 const NEGATIVE_KEYWORDS: readonly string[] = [
   'case',
   'ticket',
@@ -96,6 +129,7 @@ const SCORE = {
   STRONG_KEYWORD_NEAR: 40,
   STRONG_KEYWORD_FAR: 20,
   WEAK_KEYWORD_NEAR: 15,
+  BRAND_CONTEXT_NEAR: 15,
   IN_SUBJECT_WITH_KEYWORD: 20,
   IN_BODY_WITH_KEYWORD: 20,
   PHRASE_MATCH: 20,
@@ -297,6 +331,24 @@ function scoreCandidate(
     if (weak !== null && weak.distance <= STRONG_CONTEXT_WINDOW) {
       score += SCORE.WEAK_KEYWORD_NEAR;
       reasons.push('weak_keyword_near');
+    }
+
+    const brandEn = findClosestKeyword(
+      textLower,
+      start,
+      end,
+      BRAND_CONTEXT_KEYWORDS_EN,
+    );
+    const brandVi = findClosestKeyword(
+      textLower,
+      start,
+      end,
+      BRAND_CONTEXT_KEYWORDS_VI,
+    );
+    const brand = pickClosest(brandEn, brandVi);
+    if (brand !== null && brand.distance <= STRONG_CONTEXT_WINDOW) {
+      score += SCORE.BRAND_CONTEXT_NEAR;
+      reasons.push('brand_context_near');
     }
   }
 

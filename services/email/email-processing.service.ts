@@ -175,13 +175,18 @@ export async function processMockEmail(
         mailboxEmail,
         reason: extraction.reason,
       });
+      // Surface the *extractor* confidence here, not the detector score. The
+      // "code confidence too low" outcome is decided by the extractor, so
+      // reporting the detector's score (which can sit at/above its own
+      // threshold) is misleading. Fall back to 0 when there is no candidate.
+      const extractionConfidence = extraction.candidates[0]?.confidence ?? 0;
       return {
         status,
         success: false,
         messageId,
         mailboxEmail,
         platform: detection.platform,
-        confidence: detection.confidenceScore,
+        confidence: extractionConfidence,
         reason: extraction.reason,
       };
     }
