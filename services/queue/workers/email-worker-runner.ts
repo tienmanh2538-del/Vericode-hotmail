@@ -31,9 +31,26 @@ import {
 } from '@/services/email/graph-message-pipeline.service';
 import { recordCodeEventToDb } from '@/services/logs/prisma-code-event-store';
 import { createAuditLogInDb } from '@/services/logs/prisma-audit-log-store';
+import {
+  createInMemoryMailboxProcessingLock,
+  type MailboxProcessingLock,
+} from '@/services/queue/mailbox-processing-lock';
+import {
+  createInMemoryDestinationThrottle,
+  type DestinationThrottle,
+} from '@/services/queue/destination-throttle';
 import type { EmailWorkerPipeline } from './email-worker';
 
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
+
+// TASK-055 — process-wide singletons shared across every job the worker runs, so
+// the per-mailbox lock map and the per-destination spacing map are shared state.
+// Building them here (not per job) is what makes the guards effective. Both are
+// pure in-memory structures with no import-time I/O.
+const sharedMailboxProcessingLock: MailboxProcessingLock =
+  createInMemoryMailboxProcessingLock();
+const sharedDestinationThrottle: DestinationThrottle =
+  createInMemoryDestinationThrottle();
 
 // ---------------------------------------------------------------------------
 // Mailbox lookup port
@@ -222,6 +239,13 @@ export function buildDefaultEmailPipelineDeps(
     audit: overrides.audit ?? createDbAuditPort(logger),
     logger,
     now: overrides.now,
+    // TASK-055 — production guards: serialize per-mailbox processing and space
+    // sends to a shared reusable destination. Shared singletons so their state
+    // spans every job; still overridable for tests.
+    lock: overrides.lock ?? sharedMailboxProcessingLock,
+    destinationThrottle:
+      overrides.destinationThrottle ?? sharedDestinationThrottle,
+    sleep: overrides.sleep,
   };
 }
 

@@ -128,11 +128,16 @@ export async function processEmailWebhookJob(
 
   // Transient failures should trigger BullMQ retry. Skips and CODE_SENT are
   // terminal — returning the envelope lets the queue treat them as complete.
+  //
+  // TASK-055: DEFERRED_MAILBOX_BUSY is also retryable — another job for the same
+  // mailbox holds the per-mailbox lock, so this job throws to be re-attempted
+  // later with backoff (bounded by the job's `attempts`, never an infinite loop).
   if (
     result.status === 'FAILED_GRAPH_FETCH' ||
     result.status === 'FAILED_RECONNECT_REQUIRED' ||
     result.status === 'FAILED_TELEGRAM_SEND' ||
-    result.status === 'FAILED_UNEXPECTED'
+    result.status === 'FAILED_UNEXPECTED' ||
+    result.status === 'DEFERRED_MAILBOX_BUSY'
   ) {
     throw new EmailWorkerProcessingError(result);
   }

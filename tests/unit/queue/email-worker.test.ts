@@ -105,6 +105,8 @@ describe('processEmailWebhookJob — worker → pipeline wiring', () => {
     'FAILED_RECONNECT_REQUIRED',
     'FAILED_TELEGRAM_SEND',
     'FAILED_UNEXPECTED',
+    // TASK-055 — a deferred (mailbox-busy) job must be retried, not dropped.
+    'DEFERRED_MAILBOX_BUSY',
   ] as const)(
     'throws EmailWorkerProcessingError so BullMQ can retry when pipeline returns %s',
     async (status) => {

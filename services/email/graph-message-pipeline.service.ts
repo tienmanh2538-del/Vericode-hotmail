@@ -40,6 +40,11 @@ import {
   type AuditLogAction,
   type CreateAuditLogInput,
 } from '@/services/logs/audit-log.service';
+import type { MailboxProcessingLock } from '@/services/queue/mailbox-processing-lock';
+import {
+  buildDestinationKey,
+  type DestinationThrottle,
+} from '@/services/queue/destination-throttle';
 import { createLogger, type Logger } from '@/lib/logger';
 
 const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
@@ -52,6 +57,10 @@ export type GraphMessagePipelineStatus =
   | 'SKIPPED_LOW_CONFIDENCE'
   | 'SKIPPED_NO_CODE'
   | 'SKIPPED_NO_TELEGRAM_MAPPING'
+  // TASK-055 — another job for the SAME mailbox is already mid-pipeline; this job
+  // is deferred (treated as retryable by the worker) so it never calls
+  // Graph/Telegram concurrently with the in-flight job.
+  | 'DEFERRED_MAILBOX_BUSY'
   | 'FAILED_GRAPH_FETCH'
   | 'FAILED_TELEGRAM_SEND'
   | 'FAILED_RECONNECT_REQUIRED'
@@ -150,6 +159,15 @@ export interface GraphMessagePipelineDeps {
   audit?: AuditPort;
   logger?: Logger;
   now?: () => Date;
+  // TASK-055 — per-mailbox processing lock. When present, the job acquires the
+  // lock for its mailboxId before touching Graph/Telegram and releases it in a
+  // finally. Absent ⇒ no serialization (unchanged behavior for existing tests).
+  lock?: MailboxProcessingLock;
+  // TASK-055 — shared-destination burst guard. When present, the job spaces its
+  // Telegram send against other sends to the same chat/topic. Absent ⇒ no delay.
+  destinationThrottle?: DestinationThrottle;
+  // Injectable sleep so the throttle delay is instant under test.
+  sleep?: (ms: number) => Promise<void>;
 }
 
 interface NormalizedJob {
@@ -163,6 +181,10 @@ interface NormalizedJob {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function trimOrNull(value: unknown): string | null {
@@ -325,8 +347,6 @@ export async function processGraphMessageJob(
   deps: GraphMessagePipelineDeps,
 ): Promise<GraphMessagePipelineResult> {
   const logger = deps.logger ?? createLogger();
-  const now = deps.now ?? (() => new Date());
-  const audit = deps.audit;
 
   // Step 1: validate the job payload.
   const normalized = normalizeJob(job);
@@ -350,6 +370,46 @@ export async function processGraphMessageJob(
     graphMessageId: normalized.graphMessageId,
     internetMessageId: normalized.internetMessageId,
   };
+
+  // TASK-055 — per-mailbox processing lock. Acquire BEFORE any Graph/Telegram
+  // side effect so two jobs for the same mailbox never run the pipeline in
+  // parallel. When the mailbox is busy the job defers (the worker treats
+  // DEFERRED_MAILBOX_BUSY as retryable) instead of calling Graph/Telegram now.
+  const lockHandle = deps.lock ? deps.lock.acquire(normalized.mailboxId) : null;
+  if (deps.lock && !lockHandle) {
+    logger.info('Graph message job deferred: mailbox is busy', {
+      mailboxId: normalized.mailboxId,
+    });
+    return {
+      ok: false,
+      status: 'DEFERRED_MAILBOX_BUSY',
+      ...baseResultKeys,
+      sentToTelegram: false,
+      reason: 'mailbox_busy',
+    };
+  }
+
+  try {
+    return await processActiveMailboxJob(normalized, baseResultKeys, deps);
+  } finally {
+    // Always release — even when the pipeline throws unexpectedly — so a single
+    // failed job can never wedge the mailbox.
+    lockHandle?.release();
+  }
+}
+
+async function processActiveMailboxJob(
+  normalized: NormalizedJob,
+  baseResultKeys: {
+    mailboxId: string;
+    graphMessageId: string;
+    internetMessageId: string | null;
+  },
+  deps: GraphMessagePipelineDeps,
+): Promise<GraphMessagePipelineResult> {
+  const logger = deps.logger ?? createLogger();
+  const now = deps.now ?? (() => new Date());
+  const audit = deps.audit;
 
   // Step 2: load mailbox and check ACTIVE.
   let mailbox: MailboxLookupRecord | null;
@@ -828,6 +888,27 @@ export async function processGraphMessageJob(
     code,
     receivedAt,
   });
+
+  // TASK-055 — shared-destination burst guard. Many mailboxes can route to the
+  // same reusable destination; space sends to one chat/topic so a burst does not
+  // trip Telegram's per-chat flood limit. This is a bounded in-line delay (never
+  // a queue retry), so it cannot interact with the dedup claim above. Routing is
+  // unchanged — the throttle only reads the opaque destination key.
+  if (deps.destinationThrottle) {
+    const destinationKey = buildDestinationKey(
+      mapping.telegramChatId,
+      mapping.telegramThreadId,
+    );
+    const { waitMs } = deps.destinationThrottle.reserve(destinationKey);
+    if (waitMs > 0) {
+      logger.info('Throttling Telegram send for shared destination', {
+        mailboxId: mailbox.id,
+        waitMs,
+      });
+      const sleep = deps.sleep ?? defaultSleep;
+      await sleep(waitMs);
+    }
+  }
 
   try {
     await deps.telegramSender.sendTelegramMessage({
