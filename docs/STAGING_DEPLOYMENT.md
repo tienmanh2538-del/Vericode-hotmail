@@ -119,6 +119,7 @@ platform. **KHÔNG** ghi giá trị thật vào repo. Template placeholder đầ
 | `DELTA_POLLING_ENABLED` | Bật/tắt delta polling | `true` |
 | `DELTA_POLLING_INTERVAL_SECONDS` | Chu kỳ poll | `30` |
 | `DELTA_POLLING_MAX_PAGES_PER_MAILBOX` | Giới hạn trang | `10` |
+| `DELTA_POLLING_BOOTSTRAP_LOOKBACK_HOURS` | Cửa sổ lookback lần sync đầu | `24` |
 | `SUBSCRIPTION_RENEWAL_ENABLED` | Bật/tắt renewal | `true` |
 | `SUBSCRIPTION_RENEWAL_INTERVAL_SECONDS` | Chu kỳ renewal | `900` |
 | `SUBSCRIPTION_RENEWAL_WINDOW_HOURS` | Cửa sổ renew trước hạn | `24` |
