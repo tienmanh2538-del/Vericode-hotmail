@@ -91,8 +91,11 @@ destination), **stop the worker services immediately** before investigating:
   (TASK-052 disconnect guard); a mailbox without a valid active mapping is never
   treated as Ready and never relays (TASK-055/TASK-056).
 
-Detailed backup / restore / incident-response procedures are intentionally
-**out of scope here** and land in **TASK-060**.
+Detailed backup / restore / incident-response procedures live in the **TASK-060
+runbook**: `docs/tasks/TASK-060-backup-restore-incident-response.md` (backup
+strategy, isolated restore drill, per-incident response, emergency worker
+shutdown). Verification notes:
+`docs/reports/TASK-060-backup-restore-incident-response.md`.
 
 ## Beta guardrails (must hold)
 
@@ -111,6 +114,8 @@ Detailed backup / restore / incident-response procedures are intentionally
 
 ## Full reference
 
+- `docs/tasks/TASK-060-backup-restore-incident-response.md` — backup, restore
+  drill, and incident-response runbook for this beta.
 - `docs/reports/TASK-059-production-deployment-limited-internal-beta.md` — this
   beta's verification results, blocker, and smoke-test checklist.
 - `docs/reports/TASK-058-production-environment-secret-setup.md` — standardized
