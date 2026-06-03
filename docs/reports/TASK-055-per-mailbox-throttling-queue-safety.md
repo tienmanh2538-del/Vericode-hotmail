@@ -127,6 +127,11 @@ Test mới:
   job xong, sau lỗi pipeline, và sau lỗi Telegram; pipeline chờ đúng khoảng giãn cách trước khi send;
   throttle được khóa theo chat + topic đã resolve.
 
+> **Follow-up coverage (commit sau):** File `tests/unit/email/graph-message-pipeline.throttling.test.ts`
+> được bổ sung như follow-up test coverage cho graph message pipeline throttling, bảo vệ per-mailbox lock
+> và shared-destination throttle. Gemini review PASS và `npm run verify` PASS. Đây là follow-up coverage,
+> không mở rộng scope TASK-055.
+
 Test cập nhật:
 
 - `tests/unit/queue/email-worker.test.ts` — bổ sung `DEFERRED_MAILBOX_BUSY` vào nhóm status retryable.
