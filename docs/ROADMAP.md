@@ -192,7 +192,7 @@ Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-0
 
 ## Sprint 14 — Production security & internal launch
 
-- TASK-057: Production auth hardening for internal staff
+- TASK-057: Production auth hardening for internal staff — done. Gemini review PASS, `npm run verify` PASS. Kết quả chính đã chốt: production fail-closed tường minh (admin access ở production luôn bị từ chối khi chưa có sign-in provider thật — không dùng demo user dev, không dùng staging passphrase login); role/userId chỉ lấy từ session đã verify server-side, không lấy từ request/cookie chưa verify; staging session cookie giữ httpOnly/secure/sameSite Lax/expiry và logout xóa đúng; RBAC OWNER/ADMIN vs STAFF_READ_ONLY và customer assignment scope vẫn enforce ở service/API layer; login page production không lộ tên biến môi trường hay cơ chế; thêm audit tối thiểu cho login/logout/access-denied (metadata an toàn). Khách hàng vẫn không có login/portal/signup. Không phá routing Telegram, disconnect guard (TASK-052), throttling/queue safety (TASK-055), health dashboard (TASK-056). Xem `docs/tasks/TASK-057-production-auth-hardening-internal-staff.md` và `docs/reports/TASK-057-production-auth-hardening-internal-staff.md`. Rủi ro còn lại: chưa có production sign-in provider thật (cố ý — admin access production khóa an toàn cho tới khi TASK-058 thêm provider); audit là best-effort nên có thể không ghi khi store không sẵn sàng nhưng luồng auth vẫn an toàn; scope đa-tiến-trình vẫn theo baseline TASK-055. Bàn giao tiếp cho TASK-058 (production environment & secret setup) rồi TASK-059 (production deployment limited internal beta).
 - TASK-058: Production environment & secret setup
 - TASK-059: Production deployment limited internal beta
 - TASK-060: Backup, restore & incident response
