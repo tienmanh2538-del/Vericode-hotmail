@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { loadEnv } from '@/lib/env';
 import { STAGING_SESSION_COOKIE } from '@/lib/auth/staging-session';
+import { recordAdminLogoutAudit } from '@/lib/auth/auth-audit';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +13,7 @@ export async function POST(_request: NextRequest): Promise<NextResponse> {
   // proxy request.url resolves to the internal http://localhost:8080, which would
   // bounce the browser to a dead address (ERR_CONNECTION_REFUSED).
   const { values } = loadEnv();
+  await recordAdminLogoutAudit({ appEnv: values.APP_ENV });
   const response = NextResponse.redirect(new URL('/login', values.APP_URL), 303);
   response.cookies.set(STAGING_SESSION_COOKIE, '', {
     httpOnly: true,

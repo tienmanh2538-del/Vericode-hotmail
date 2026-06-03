@@ -8,6 +8,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { loadEnv } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
+import { recordAdminLoginAudit } from '@/lib/auth/auth-audit';
 import {
   STAGING_SESSION_COOKIE,
   STAGING_SESSION_TTL_MS,
@@ -58,6 +59,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (!verifyStagingPassword(password, values)) {
     // No password / token / env value is logged — only the failure event.
     logger.warn('Staging admin login attempt rejected');
+    await recordAdminLoginAudit('denied', { appEnv: values.APP_ENV });
     return redirect(baseUrl, '/login?error=invalid');
   }
 
@@ -82,5 +84,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     maxAge: SESSION_MAX_AGE_SECONDS,
   });
   logger.info('Staging admin login succeeded');
+  await recordAdminLoginAudit('success', { appEnv: values.APP_ENV });
   return response;
 }

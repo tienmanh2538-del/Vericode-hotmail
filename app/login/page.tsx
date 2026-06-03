@@ -66,6 +66,7 @@ function StagingLoginForm({ error }: { error?: string }) {
 export default function LoginPage({ searchParams }: LoginPageProps) {
   const { values } = loadEnv();
   const isStaging = values.APP_ENV === "staging";
+  const isDevelopment = values.APP_ENV === "development";
   const stagingConfigured = isStagingAdminConfigured(values);
 
   return (
@@ -81,15 +82,20 @@ export default function LoginPage({ searchParams }: LoginPageProps) {
         <p role="alert" style={{ color: "#b91c1c" }}>
           {ERROR_MESSAGES.unconfigured}
         </p>
+      ) : isDevelopment ? (
+        <p>
+          Local development. Admin access uses the dev-only demo user when its
+          flag is enabled; no real sign-in is required.
+        </p>
       ) : (
-        <>
-          <p>Login will be implemented later.</p>
-          <p>
-            Real authentication (Microsoft OAuth) lands in a later sprint. Until then,
-            admin access requires the dev-only <code>AUTH_DEV_DEMO_USER</code> flag, or
-            on staging the <code>STAGING_ADMIN_PASSWORD</code> passphrase.
-          </p>
-        </>
+        // TASK-057 — production (and any non-dev/non-staging runtime) is
+        // fail-closed: there is no real sign-in provider yet, so admin access is
+        // denied. The message stays generic — it never names env vars, the
+        // staging passphrase, or any other mechanism that could aid an attacker.
+        <p role="alert" style={{ color: "#b91c1c" }}>
+          Admin sign-in is not available. A production authentication provider
+          has not been configured, so access is locked.
+        </p>
       )}
     </main>
   );
