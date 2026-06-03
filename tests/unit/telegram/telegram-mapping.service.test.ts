@@ -605,6 +605,109 @@ describe('createTelegramMappingFromDestination (TASK-053)', () => {
   });
 });
 
+describe('disconnected-mailbox guard on the destination path (TASK-067)', () => {
+  const ACTIVE_DESTINATION = {
+    id: 'dest_1',
+    customerId: 'cu_1',
+    status: 'ACTIVE',
+    telegramChatId: '-1001234567890',
+    telegramGroupName: 'Client A group',
+    telegramThreadId: '42',
+    telegramTopicName: 'Codes',
+  };
+
+  it('rejects creating an ACTIVE mapping for a DISABLED (disconnected) mailbox', async () => {
+    mailboxFindUnique.mockResolvedValue({
+      id: 'mb_1',
+      customerId: 'cu_1',
+      status: 'DISABLED',
+    });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+
+    await expect(
+      createTelegramMappingFromDestination({
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('rejects updating a mapping to ACTIVE for a DISABLED mailbox', async () => {
+    mailboxFindUnique.mockResolvedValue({
+      id: 'mb_1',
+      customerId: 'cu_1',
+      status: 'DISABLED',
+    });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+
+    await expect(
+      updateTelegramMappingFromDestination('tm_1', {
+        mailboxId: 'mb_1',
+        destinationId: 'dest_1',
+        status: 'ACTIVE',
+      }),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('allows a DISABLED (pre-staged) mapping for a DISABLED mailbox without re-enabling it', async () => {
+    mailboxFindUnique.mockResolvedValue({
+      id: 'mb_1',
+      customerId: 'cu_1',
+      status: 'DISABLED',
+    });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      status: 'DISABLED',
+      destination: { ...ACTIVE_DESTINATION, displayName: 'Client A group' },
+    });
+
+    await createTelegramMappingFromDestination({
+      mailboxId: 'mb_1',
+      destinationId: 'dest_1',
+      status: 'DISABLED',
+    });
+
+    // The mapping is written as DISABLED; the service never touches mailbox state.
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'DISABLED' }),
+      }),
+    );
+    expect(mailboxFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'mb_1' } }),
+    );
+  });
+
+  it('still allows an ACTIVE mapping for an ACTIVE mailbox', async () => {
+    mailboxFindUnique.mockResolvedValue({
+      id: 'mb_1',
+      customerId: 'cu_1',
+      status: 'ACTIVE',
+    });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      destination: { ...ACTIVE_DESTINATION, displayName: 'Client A group' },
+    });
+
+    await createTelegramMappingFromDestination({
+      mailboxId: 'mb_1',
+      destinationId: 'dest_1',
+      status: 'ACTIVE',
+    });
+
+    expect(create).toHaveBeenCalled();
+  });
+});
+
 describe('customer-scope guard on the destination path (TASK-065)', () => {
   const ACTIVE_DESTINATION = {
     id: 'dest_1',

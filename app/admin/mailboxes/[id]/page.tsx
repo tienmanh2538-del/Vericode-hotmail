@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { ConnectMailboxButton } from '@/components/admin/ConnectMailboxButton';
 import { MailboxCustomerAssignForm } from '@/components/admin/MailboxCustomerAssignForm';
 import { MailboxDisconnectForm } from '@/components/admin/MailboxDisconnectForm';
 import { MailboxReadinessBadge } from '@/components/status/MailboxReadinessBadge';
@@ -237,17 +238,26 @@ export default async function MailboxDetailPage({
         {readiness !== 'READY' ? (
           <div className="admin-banner admin-banner--warning" role="status">
             <strong>Mailbox chưa sẵn sàng relay code.</strong>{' '}
-            {!hasCustomer
-              ? 'Hãy gắn mailbox này vào đúng customer trước.'
-              : !activeMapping
-                ? 'Mailbox chưa có active Telegram destination. Cần tạo mapping trước khi coi là Ready.'
-                : 'Mailbox đang ở trạng thái lỗi vận hành (token/subscription/webhook). Kiểm tra chi tiết bên dưới.'}
+            {isDisconnected
+              ? 'Mailbox đã bị ngắt kết nối nên không poll, không renew subscription và không relay code. Hãy reconnect Hotmail/Outlook để dùng lại — gán Telegram mapping KHÔNG bật lại mailbox.'
+              : !hasCustomer
+                ? 'Hãy gắn mailbox này vào đúng customer trước.'
+                : !activeMapping
+                  ? 'Mailbox chưa có active Telegram destination. Cần tạo mapping trước khi coi là Ready.'
+                  : 'Mailbox đang ở trạng thái lỗi vận hành (token/subscription/webhook). Kiểm tra chi tiết bên dưới.'}
           </div>
         ) : null}
 
         <ul className="mailbox-detail__checklist">
           <li>
-            <span aria-hidden="true">✓</span> Mailbox đã connect ({mailbox.provider})
+            <span aria-hidden="true">{isDisconnected ? '✗' : '✓'}</span>{' '}
+            {isDisconnected ? (
+              <>
+                Mailbox đã ngắt kết nối — cần reconnect ({mailbox.provider})
+              </>
+            ) : (
+              <>Mailbox đã connect ({mailbox.provider})</>
+            )}
           </li>
           <li>
             <span aria-hidden="true">{hasCustomer ? '✓' : '✗'}</span> Gắn customer:{' '}
@@ -303,6 +313,19 @@ export default async function MailboxDetailPage({
             action={disconnectAction}
             alreadyDisconnected={isDisconnected}
           />
+          {isDisconnected ? (
+            <div className="mailbox-detail__reconnect">
+              <p className="mailbox-detail__muted">
+                Muốn dùng lại mailbox này? Reconnect qua Microsoft OAuth để bật
+                lại. Telegram mapping sẽ không tự bật lại mailbox.
+              </p>
+              <ConnectMailboxButton
+                variant="compact"
+                showIntro={false}
+                buttonLabel="Reconnect Hotmail / Outlook"
+              />
+            </div>
+          ) : null}
         </section>
       ) : null}
 

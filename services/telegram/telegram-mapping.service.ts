@@ -79,6 +79,12 @@ export class TelegramDestinationMappingConflictError extends Error {
   }
 }
 
+// TASK-067 — a mailbox in this status has been intentionally disconnected
+// (TASK-052) and cannot poll/renew/relay. It must never host an ACTIVE Telegram
+// mapping, otherwise the Telegram page would show ACTIVE while the mailbox stays
+// disconnected — the exact inconsistency this task fixes.
+const MAILBOX_STATUS_DISABLED = 'DISABLED';
+
 interface DestinationRelation {
   id: string;
   displayName: string;
@@ -313,7 +319,7 @@ async function resolveDestinationMapping(
 
   const mailbox = await prisma.mailbox.findUnique({
     where: { id: input.mailboxId },
-    select: { id: true, customerId: true },
+    select: { id: true, customerId: true, status: true },
   });
   if (!mailbox) {
     throw new TelegramDestinationMappingConflictError(
@@ -330,6 +336,20 @@ async function resolveDestinationMapping(
     throw new TelegramDestinationMappingConflictError(
       'mailboxId',
       'You do not have access to this mailbox.',
+    );
+  }
+
+  // TASK-067 — a disconnected mailbox (DISABLED) cannot relay codes, so it must
+  // never carry an ACTIVE mapping. Activating one would not re-enable the
+  // mailbox (TASK-052 keeps it inert) but would make the Telegram page show
+  // ACTIVE while Mailboxes/detail still shows Disabled — misleading the
+  // operator. We DELIBERATELY do not re-enable the mailbox here; the operator
+  // must reconnect it. A DISABLED mapping is still allowed so an operator can
+  // pre-stage a mapping and activate it after reconnecting.
+  if (input.status === 'ACTIVE' && mailbox.status === MAILBOX_STATUS_DISABLED) {
+    throw new TelegramDestinationMappingConflictError(
+      'mailboxId',
+      'This mailbox is disconnected. Reconnect the mailbox before activating a Telegram mapping.',
     );
   }
 

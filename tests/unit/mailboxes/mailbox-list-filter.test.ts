@@ -77,6 +77,22 @@ describe('deriveMailboxReadiness', () => {
       'DISABLED',
     );
   });
+
+  // TASK-067 — a disconnected mailbox must never read as Ready, even when it
+  // still carries an active mapping/destination, a customer, and a healthy
+  // subscription (e.g. a stale ACTIVE mapping left over before reconnecting).
+  it('DISABLED wins over an otherwise fully-ready mailbox', () => {
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({
+          status: 'DISABLED',
+          customerName: 'Acme',
+          telegramMappingStatus: 'ACTIVE',
+          subscriptionStatus: 'ACTIVE',
+        }),
+      ),
+    ).toBe('DISABLED');
+  });
 });
 
 describe('deriveMailboxReadiness — customer requirement (TASK-047)', () => {

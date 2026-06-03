@@ -164,6 +164,14 @@
   margin: 0;
 }
 
+/* TASK-067 — reconnect affordance shown below the disconnect note when the
+   mailbox is already disconnected. */
+.mailbox-detail__reconnect {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #fecaca;
+}
+
 /* TASK-052 — destructive disconnect surface. Visually separated so it does not
    read as a routine action. */
 .mailbox-detail__section--danger {
