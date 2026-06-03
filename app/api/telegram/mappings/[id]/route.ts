@@ -1,12 +1,13 @@
 import { NextResponse } from 'next/server';
+import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import { hasPermission } from '@/lib/auth/permissions';
 import { getCurrentUser } from '@/lib/auth/session';
 import {
   deleteTelegramMapping,
   disableTelegramMapping,
-  TelegramMappingConflictError,
-  TelegramMappingValidationError,
-  updateTelegramMapping,
+  TelegramDestinationMappingConflictError,
+  TelegramDestinationMappingValidationError,
+  updateTelegramMappingFromDestination,
 } from '@/services/telegram/telegram-mapping.service';
 
 export const dynamic = 'force-dynamic';
@@ -31,6 +32,7 @@ interface MappingForSerialize {
   telegramGroupName: string | null;
   telegramThreadId: string | null;
   telegramTopicName: string | null;
+  destinationId: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -45,6 +47,7 @@ function serialize(mapping: MappingForSerialize) {
     telegramGroupName: mapping.telegramGroupName,
     telegramThreadId: mapping.telegramThreadId,
     telegramTopicName: mapping.telegramTopicName,
+    destinationId: mapping.destinationId,
     status: mapping.status,
     createdAt: mapping.createdAt.toISOString(),
     updatedAt: mapping.updatedAt.toISOString(),
@@ -93,16 +96,26 @@ export async function PATCH(
       );
     }
 
-    const updated = await updateTelegramMapping(id, body as Record<string, unknown>);
+    // TASK-065 — route the legacy update through the destination-based service
+    // path so customer isolation is enforced (mailbox and destination must share
+    // a customer). Raw `telegramChatId`/group/thread are no longer trusted; the
+    // caller supplies a `destinationId`. The viewer scope is passed so a
+    // restricted caller cannot move a mapping onto an out-of-scope mailbox.
+    const scope = await resolveCustomerScope(user);
+    const updated = await updateTelegramMappingFromDestination(
+      id,
+      body as Record<string, unknown>,
+      scope,
+    );
     return NextResponse.json({ ok: true, data: serialize(updated) });
   } catch (error) {
-    if (error instanceof TelegramMappingValidationError) {
+    if (error instanceof TelegramDestinationMappingValidationError) {
       return NextResponse.json(
         { ok: false, error: 'Validation failed', fields: error.errors },
         { status: 400 },
       );
     }
-    if (error instanceof TelegramMappingConflictError) {
+    if (error instanceof TelegramDestinationMappingConflictError) {
       return NextResponse.json(
         {
           ok: false,

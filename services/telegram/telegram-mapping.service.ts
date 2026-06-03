@@ -303,6 +303,7 @@ interface ResolvedDestinationMapping {
 
 async function resolveDestinationMapping(
   raw: RawTelegramDestinationMappingInput,
+  scope?: CustomerScope,
 ): Promise<ResolvedDestinationMapping> {
   const result = validateTelegramDestinationMappingInput(raw);
   if (!result.ok) {
@@ -318,6 +319,17 @@ async function resolveDestinationMapping(
     throw new TelegramDestinationMappingConflictError(
       'mailboxId',
       'Selected mailbox no longer exists.',
+    );
+  }
+
+  // TASK-065 — fail closed on the caller's data-visibility scope. OWNER/ADMIN
+  // resolve to an 'all' scope so this is a no-op for them, but a future caller
+  // with a restricted scope (or a signed-out/unknown viewer) can never create
+  // or move a mapping onto a mailbox whose customer is outside their scope.
+  if (scope && !scopeAllowsCustomer(scope, mailbox.customerId)) {
+    throw new TelegramDestinationMappingConflictError(
+      'mailboxId',
+      'You do not have access to this mailbox.',
     );
   }
 
@@ -365,8 +377,9 @@ async function resolveDestinationMapping(
 
 export async function createTelegramMappingFromDestination(
   raw: RawTelegramDestinationMappingInput,
+  scope?: CustomerScope,
 ): Promise<TelegramMappingRecord> {
-  const resolved = await resolveDestinationMapping(raw);
+  const resolved = await resolveDestinationMapping(raw, scope);
 
   await assertNoConflictForDestination(resolved);
 
@@ -388,13 +401,14 @@ export async function createTelegramMappingFromDestination(
 export async function updateTelegramMappingFromDestination(
   id: string,
   raw: RawTelegramDestinationMappingInput,
+  scope?: CustomerScope,
 ): Promise<TelegramMappingRecord> {
   if (!id) {
     throw new TelegramDestinationMappingValidationError({
       mailboxId: 'Mapping id is required.',
     });
   }
-  const resolved = await resolveDestinationMapping(raw);
+  const resolved = await resolveDestinationMapping(raw, scope);
 
   await assertNoConflictForDestination(resolved, { excludeId: id });
 

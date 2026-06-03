@@ -3,10 +3,10 @@ import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import { hasPermission } from '@/lib/auth/permissions';
 import { getCurrentUser } from '@/lib/auth/session';
 import {
-  createTelegramMapping,
+  createTelegramMappingFromDestination,
   listTelegramMappings,
-  TelegramMappingConflictError,
-  TelegramMappingValidationError,
+  TelegramDestinationMappingConflictError,
+  TelegramDestinationMappingValidationError,
 } from '@/services/telegram/telegram-mapping.service';
 
 export const dynamic = 'force-dynamic';
@@ -71,7 +71,17 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const created = await createTelegramMapping(body as Record<string, unknown>);
+    // TASK-065 — this legacy REST route now routes through the destination-based
+    // service path, which enforces customer isolation (mailbox and destination
+    // must belong to the same customer). Raw `telegramChatId`/group/thread from
+    // the request are no longer trusted; the caller picks a `destinationId` and
+    // the chat/thread are derived server-side. The caller's scope is passed in
+    // so a restricted viewer can never create a mapping outside their customers.
+    const scope = await resolveCustomerScope(user);
+    const created = await createTelegramMappingFromDestination(
+      body as Record<string, unknown>,
+      scope,
+    );
     return NextResponse.json(
       {
         ok: true,
@@ -83,6 +93,7 @@ export async function POST(request: Request): Promise<NextResponse> {
           telegramGroupName: created.telegramGroupName,
           telegramThreadId: created.telegramThreadId,
           telegramTopicName: created.telegramTopicName,
+          destinationId: created.destinationId,
           status: created.status,
           createdAt: created.createdAt.toISOString(),
           updatedAt: created.updatedAt.toISOString(),
@@ -91,13 +102,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       { status: 201 },
     );
   } catch (error) {
-    if (error instanceof TelegramMappingValidationError) {
+    if (error instanceof TelegramDestinationMappingValidationError) {
       return NextResponse.json(
         { ok: false, error: 'Validation failed', fields: error.errors },
         { status: 400 },
       );
     }
-    if (error instanceof TelegramMappingConflictError) {
+    if (error instanceof TelegramDestinationMappingConflictError) {
       return NextResponse.json(
         {
           ok: false,

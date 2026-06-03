@@ -51,6 +51,7 @@ import {
   TelegramMappingConflictError,
   TelegramMappingValidationError,
   updateTelegramMapping,
+  updateTelegramMappingFromDestination,
 } from '@/services/telegram/telegram-mapping.service';
 
 const FIXTURE_ROW = {
@@ -601,5 +602,85 @@ describe('createTelegramMappingFromDestination (TASK-053)', () => {
       }),
     ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('customer-scope guard on the destination path (TASK-065)', () => {
+  const ACTIVE_DESTINATION = {
+    id: 'dest_1',
+    customerId: 'cu_1',
+    status: 'ACTIVE',
+    telegramChatId: '-1001234567890',
+    telegramGroupName: 'Client A group',
+    telegramThreadId: '42',
+    telegramTopicName: 'Codes',
+  };
+
+  it('rejects creating a mapping when the scope excludes the mailbox customer', async () => {
+    // Fail-closed: a restricted viewer (assigned to cu_other) must not be able
+    // to create a mapping for a mailbox belonging to cu_1, even though the
+    // mailbox and destination share a customer.
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+
+    await expect(
+      createTelegramMappingFromDestination(
+        { mailboxId: 'mb_1', destinationId: 'dest_1', status: 'ACTIVE' },
+        { kind: 'assigned', customerIds: ['cu_other'] },
+      ),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    // Fail before even loading the destination.
+    expect(destinationFindUnique).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('allows creating a mapping when the assigned scope includes the customer', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      destination: { ...ACTIVE_DESTINATION, displayName: 'Client A group' },
+    });
+
+    await createTelegramMappingFromDestination(
+      { mailboxId: 'mb_1', destinationId: 'dest_1', status: 'ACTIVE' },
+      { kind: 'assigned', customerIds: ['cu_1'] },
+    );
+
+    expect(create).toHaveBeenCalled();
+  });
+
+  it('allows the unrestricted (OWNER/ADMIN "all") scope', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue({
+      ...FIXTURE_ROW,
+      destinationId: 'dest_1',
+      destination: { ...ACTIVE_DESTINATION, displayName: 'Client A group' },
+    });
+
+    await createTelegramMappingFromDestination(
+      { mailboxId: 'mb_1', destinationId: 'dest_1', status: 'ACTIVE' },
+      { kind: 'all' },
+    );
+
+    expect(create).toHaveBeenCalled();
+  });
+
+  it('rejects updating a mapping onto an out-of-scope mailbox', async () => {
+    mailboxFindUnique.mockResolvedValue({ id: 'mb_1', customerId: 'cu_1' });
+    destinationFindUnique.mockResolvedValue(ACTIVE_DESTINATION);
+
+    await expect(
+      updateTelegramMappingFromDestination(
+        'tm_1',
+        { mailboxId: 'mb_1', destinationId: 'dest_1', status: 'ACTIVE' },
+        { kind: 'assigned', customerIds: ['cu_other'] },
+      ),
+    ).rejects.toBeInstanceOf(TelegramDestinationMappingConflictError);
+    expect(update).not.toHaveBeenCalled();
   });
 });
