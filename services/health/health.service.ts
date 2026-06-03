@@ -18,6 +18,11 @@ import { join } from 'node:path';
 
 import { prisma } from '@/lib/prisma';
 import { loadEnv, type AppEnv } from '@/lib/env';
+import type { CustomerScope } from '@/lib/auth/access-scope';
+import {
+  deriveMailboxReadiness,
+  type MailboxReadiness,
+} from '@/lib/mailboxes/mailbox-list-filter';
 import { redactSensitiveText } from '@/lib/security/redact';
 import type {
   GraphSubscriptionStatusValue,
@@ -26,6 +31,7 @@ import type {
   TelegramMappingStatusValue,
 } from '@/services/microsoft/mailbox-list.service';
 import type {
+  CustomerWorkloadRow,
   HealthDashboardData,
   HealthLevel,
   HealthLoadResult,
@@ -403,6 +409,76 @@ export function aggregateOverallHealth(
 }
 
 // ---------------------------------------------------------------------------
+// Workload roll-up (pure — unit-tested independently of Prisma)
+// ---------------------------------------------------------------------------
+
+/** Readiness values that mean a mailbox cannot currently relay a code. */
+const ERROR_OR_DISCONNECTED_READINESS: ReadonlySet<MailboxReadiness> = new Set([
+  'TOKEN_ISSUE',
+  'SUBSCRIPTION_ISSUE',
+  'WEBHOOK_ISSUE',
+  'ERROR',
+  'DISABLED',
+]);
+
+const UNASSIGNED_WORKLOAD_LABEL = 'Unassigned';
+
+/**
+ * Group already-scoped mailbox rows into a per-customer workload roll-up.
+ *
+ * SECURITY: this is a pure function over rows the caller already scoped — it
+ * never widens the set, so a STAFF_READ_ONLY caller can only ever produce rows
+ * for their assigned customers. Mailboxes with no customer collapse into a
+ * single synthetic "Unassigned" bucket (only ever visible to OWNER/ADMIN, since
+ * an assigned scope excludes customer-less mailboxes).
+ */
+export function buildCustomerWorkload(
+  rows: readonly MailboxHealthRow[],
+): CustomerWorkloadRow[] {
+  const groups = new Map<string, CustomerWorkloadRow>();
+
+  for (const row of rows) {
+    const key = row.customerId ?? `name:${row.ownerCustomerName ?? ''}`;
+    const label =
+      row.customerName ?? row.ownerCustomerName ?? UNASSIGNED_WORKLOAD_LABEL;
+
+    const current =
+      groups.get(key) ??
+      ({
+        customerId: row.customerId,
+        customerName: label,
+        totalMailboxes: 0,
+        readyMailboxes: 0,
+        needsMapping: 0,
+        errorOrDisconnected: 0,
+        recentIssueCount: 0,
+      } satisfies CustomerWorkloadRow);
+
+    const next: CustomerWorkloadRow = {
+      ...current,
+      totalMailboxes: current.totalMailboxes + 1,
+      readyMailboxes:
+        current.readyMailboxes + (row.readiness === 'READY' ? 1 : 0),
+      needsMapping:
+        current.needsMapping + (row.readiness === 'NEEDS_MAPPING' ? 1 : 0),
+      errorOrDisconnected:
+        current.errorOrDisconnected +
+        (ERROR_OR_DISCONNECTED_READINESS.has(row.readiness) ? 1 : 0),
+      recentIssueCount: current.recentIssueCount + row.recentTelegramFailureCount,
+    };
+    groups.set(key, next);
+  }
+
+  // Stable, deterministic ordering: named customers A→Z, "Unassigned" last.
+  return Array.from(groups.values()).sort((a, b) => {
+    const aUnassigned = a.customerName === UNASSIGNED_WORKLOAD_LABEL;
+    const bUnassigned = b.customerName === UNASSIGNED_WORKLOAD_LABEL;
+    if (aUnassigned !== bUnassigned) return aUnassigned ? 1 : -1;
+    return a.customerName.localeCompare(b.customerName);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Email worker wiring evidence (impure — reads package.json + scripts/)
 // ---------------------------------------------------------------------------
 
@@ -443,6 +519,7 @@ export function gatherEmailWorkerWiringEvidence(
 // Whitelisted projection. No token/secret/clientState fields are selected.
 const MAILBOX_HEALTH_SELECT = {
   id: true,
+  customerId: true,
   emailAddress: true,
   provider: true,
   status: true,
@@ -505,6 +582,9 @@ function buildOverview(
     disabledOrError: rows.filter(
       (r) => r.mailboxStatus === 'DISABLED' || r.mailboxStatus === 'ERROR',
     ).length,
+    readyMailboxes: rows.filter((r) => r.readiness === 'READY').length,
+    needsMapping: rows.filter((r) => r.readiness === 'NEEDS_MAPPING').length,
+    needsCustomer: rows.filter((r) => r.readiness === 'NEEDS_CUSTOMER').length,
     subscriptionExpired,
     subscriptionExpiringSoon,
     missingTelegramMapping: rows.filter(
@@ -526,42 +606,72 @@ function buildOverview(
 }
 
 /**
- * Load the full health dashboard. Returns a discriminated result so the page
- * can render a safe error state instead of crashing if the DB is unreachable.
+ * Load the full health dashboard for a given customer scope. Returns a
+ * discriminated result so the page can render a safe error state instead of
+ * crashing if the DB is unreachable.
+ *
+ * SCOPE (TASK-056): `scope` is REQUIRED. OWNER/ADMIN pass `{ kind: 'all' }` and
+ * see everything; STAFF_READ_ONLY pass `{ kind: 'assigned', customerIds }` and
+ * the mailbox set — plus every count, aggregate and operational check derived
+ * from it — is narrowed to their assigned customers at the DB layer. An empty
+ * assigned scope fails closed (zero rows). System-wide operational checks are
+ * only built for the unrestricted scope so global infra signals never leak.
  */
 export async function loadHealthDashboard(
+  scope: CustomerScope,
   now: Date = new Date(),
 ): Promise<HealthLoadResult> {
+  const isUnrestricted = scope.kind === 'all';
   try {
-    const [
-      mailboxRows,
-      sentGroups,
-      failedGroups,
-      processedAgg,
-      renewalAgg,
-    ] = await Promise.all([
-      prisma.mailbox.findMany({
-        orderBy: { createdAt: 'desc' },
-        select: MAILBOX_HEALTH_SELECT,
-      }),
-      prisma.processedMessage.groupBy({
-        by: ['mailboxId'],
-        where: { status: 'SENT', sentToTelegramAt: { not: null } },
-        _max: { sentToTelegramAt: true },
-      }),
-      prisma.processedMessage.groupBy({
-        by: ['mailboxId'],
-        where: {
-          status: 'FAILED',
-          createdAt: { gte: new Date(now.getTime() - TELEGRAM_FAILURE_RECENT_MS) },
-        },
-        _count: { _all: true },
-      }),
-      // Most recent email the pipeline processed (any status).
-      prisma.processedMessage.aggregate({ _max: { createdAt: true } }),
-      // Most recent subscription renewal across all subscriptions.
-      prisma.graphSubscription.aggregate({ _max: { lastRenewedAt: true } }),
-    ]);
+    // TASK-056 — STAFF only sees mailboxes whose customer is assigned to them.
+    // A mailbox with no customer is never in an 'assigned' scope.
+    const mailboxRows = await prisma.mailbox.findMany({
+      orderBy: { createdAt: 'desc' },
+      ...(scope.kind === 'assigned'
+        ? { where: { customerId: { in: scope.customerIds } } }
+        : {}),
+      select: MAILBOX_HEALTH_SELECT,
+    });
+
+    // Every per-message / per-subscription aggregate is restricted to the
+    // mailboxes already in scope, so a staff viewer's totals can never include
+    // out-of-scope activity. For OWNER/ADMIN this is the full mailbox set.
+    const scopedMailboxIds = mailboxRows.map((row) => row.id);
+    const mailboxScopeWhere = { mailboxId: { in: scopedMailboxIds } };
+
+    const [sentGroups, failedGroups, processedAgg, renewalAgg] =
+      await Promise.all([
+        prisma.processedMessage.groupBy({
+          by: ['mailboxId'],
+          where: {
+            ...mailboxScopeWhere,
+            status: 'SENT',
+            sentToTelegramAt: { not: null },
+          },
+          _max: { sentToTelegramAt: true },
+        }),
+        prisma.processedMessage.groupBy({
+          by: ['mailboxId'],
+          where: {
+            ...mailboxScopeWhere,
+            status: 'FAILED',
+            createdAt: {
+              gte: new Date(now.getTime() - TELEGRAM_FAILURE_RECENT_MS),
+            },
+          },
+          _count: { _all: true },
+        }),
+        // Most recent email the pipeline processed (any status), in scope.
+        prisma.processedMessage.aggregate({
+          where: mailboxScopeWhere,
+          _max: { createdAt: true },
+        }),
+        // Most recent subscription renewal across in-scope subscriptions.
+        prisma.graphSubscription.aggregate({
+          where: mailboxScopeWhere,
+          _max: { lastRenewedAt: true },
+        }),
+      ]);
 
     const lastSentByMailbox = new Map<string, Date | null>();
     for (const group of sentGroups) {
@@ -600,6 +710,7 @@ export async function loadHealthDashboard(
       const recentTelegramFailureCount = failuresByMailbox.get(row.id) ?? 0;
       const mailboxStatus = row.status as MailboxStatusValue;
       const provider = row.provider as MailboxProviderValue;
+      const customerName = row.customer?.name ?? null;
 
       const { level, reasons } = classifyMailboxHealth({
         status: mailboxStatus,
@@ -613,11 +724,23 @@ export async function loadHealthDashboard(
         now,
       });
 
+      // Single shared definition of "is this mailbox ready?" (TASK-046/047).
+      // A disconnected mailbox (RECONNECT_REQUIRED/ERROR/…) is never READY, and
+      // an ACTIVE mailbox without an active mapping surfaces as NEEDS_MAPPING.
+      const readiness = deriveMailboxReadiness({
+        status: mailboxStatus,
+        customerName,
+        ownerCustomerName: row.ownerCustomerName,
+        telegramMappingStatus,
+        subscriptionStatus,
+      });
+
       return {
         id: row.id,
+        customerId: row.customerId ?? null,
         emailAddress: row.emailAddress,
         ownerCustomerName: row.ownerCustomerName,
-        customerName: row.customer?.name ?? null,
+        customerName,
         mailboxStatus,
         provider,
         tokenStatus: deriveTokenStatus(mailboxStatus),
@@ -627,6 +750,8 @@ export async function loadHealthDashboard(
         lastSuccessfulSyncAt: row.lastSuccessfulSyncAt,
         lastPolledAt: row.deltaLastPolledAt,
         lastCodeSentAt: lastSentByMailbox.get(row.id) ?? null,
+        readiness,
+        recentTelegramFailureCount,
         lastErrorShort: sanitizeErrorMessage(row.deltaLastErrorMessage),
         level,
         reasons,
@@ -664,28 +789,51 @@ export async function loadHealthDashboard(
     const redisConfigured =
       typeof envValues.REDIS_URL === 'string' && envValues.REDIS_URL.length > 0;
 
-    const emailWorker = classifyEmailWorkerWiring(
-      gatherEmailWorkerWiringEvidence(),
-    );
-    const subscriptionCheck = classifySubscriptionRenewal(subscriptions, now);
-    const pollingCheck = classifyDeltaPolling(
-      mailboxes.map((m) => ({ provider: m.provider, lastPolledAt: m.lastPolledAt })),
-      now,
-    );
-    const queueCheck = classifyQueueRedis(redisConfigured, envValues.APP_ENV);
-    const telegramCheck = classifyTelegramReliability(totalRecentFailures, everSent);
-    const webhookCheck = classifyWebhookHealth(
-      mailboxes.map((m) => m.mailboxStatus),
-    );
-
-    const operationalChecks: OperationalCheck[] = [
-      { id: 'EMAIL_WORKER_PIPELINE', label: 'Email worker pipeline', ...emailWorker },
-      { id: 'DELTA_POLLING', label: 'Delta polling', ...pollingCheck },
-      { id: 'SUBSCRIPTION_RENEWAL', label: 'Subscription renewal', ...subscriptionCheck },
-      { id: 'QUEUE_REDIS', label: 'Queue / Redis', ...queueCheck },
-      { id: 'TELEGRAM_RELIABILITY', label: 'Telegram send reliability', ...telegramCheck },
-      { id: 'WEBHOOK_HEALTH', label: 'Webhook health', ...webhookCheck },
-    ];
+    // System-wide operational checks (email worker wiring, queue/Redis, worker
+    // heartbeats) are global infrastructure signals — they are only built for
+    // OWNER/ADMIN. STAFF_READ_ONLY receives an empty list so a global count or
+    // infra detail never crosses the scope boundary (defence in depth: the page
+    // also hides this section for staff).
+    const operationalChecks: OperationalCheck[] = isUnrestricted
+      ? [
+          {
+            id: 'EMAIL_WORKER_PIPELINE',
+            label: 'Email worker pipeline',
+            ...classifyEmailWorkerWiring(gatherEmailWorkerWiringEvidence()),
+          },
+          {
+            id: 'DELTA_POLLING',
+            label: 'Delta polling',
+            ...classifyDeltaPolling(
+              mailboxes.map((m) => ({
+                provider: m.provider,
+                lastPolledAt: m.lastPolledAt,
+              })),
+              now,
+            ),
+          },
+          {
+            id: 'SUBSCRIPTION_RENEWAL',
+            label: 'Subscription renewal',
+            ...classifySubscriptionRenewal(subscriptions, now),
+          },
+          {
+            id: 'QUEUE_REDIS',
+            label: 'Queue / Redis',
+            ...classifyQueueRedis(redisConfigured, envValues.APP_ENV),
+          },
+          {
+            id: 'TELEGRAM_RELIABILITY',
+            label: 'Telegram send reliability',
+            ...classifyTelegramReliability(totalRecentFailures, everSent),
+          },
+          {
+            id: 'WEBHOOK_HEALTH',
+            label: 'Webhook health',
+            ...classifyWebhookHealth(mailboxes.map((m) => m.mailboxStatus)),
+          },
+        ]
+      : [];
 
     const overall = aggregateOverallHealth(
       mailboxes.map((m) => m.level),
@@ -706,10 +854,14 @@ export async function loadHealthDashboard(
       },
     );
 
+    const workload = buildCustomerWorkload(mailboxes);
+
     const data: HealthDashboardData = {
       overview,
       mailboxes,
+      workload,
       operationalChecks,
+      isUnrestricted,
       generatedAt: now,
     };
     return { ok: true, data };

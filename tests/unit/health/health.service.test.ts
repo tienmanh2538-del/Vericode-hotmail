@@ -18,6 +18,7 @@ vi.mock('@/lib/prisma', () => ({
 
 import {
   aggregateOverallHealth,
+  buildCustomerWorkload,
   classifyDeltaPolling,
   classifyEmailWorkerWiring,
   classifyMailboxHealth,
@@ -30,8 +31,13 @@ import {
   DELTA_POLLING_STALE_MS,
   TELEGRAM_FAILURE_CRITICAL_COUNT,
 } from '@/services/health/health.service';
+import type { CustomerScope } from '@/lib/auth/access-scope';
+import type { MailboxHealthRow } from '@/services/health/health.types';
 
 const NOW = new Date('2026-05-29T12:00:00.000Z');
+
+// OWNER/ADMIN scope — sees everything. STAFF scope is { kind: 'assigned', … }.
+const ALL_SCOPE: CustomerScope = { kind: 'all' };
 
 function baseMailboxInput(
   overrides: Partial<Parameters<typeof classifyMailboxHealth>[0]> = {},
@@ -334,7 +340,7 @@ describe('loadHealthDashboard', () => {
     mailboxFindMany.mockRejectedValue(new Error('connection refused at db://secret'));
     processedGroupBy.mockResolvedValue([]);
 
-    const result = await loadHealthDashboard(NOW);
+    const result = await loadHealthDashboard(ALL_SCOPE, NOW);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.message).toBe('Không thể tải health dashboard lúc này.');
@@ -347,7 +353,7 @@ describe('loadHealthDashboard', () => {
     mailboxFindMany.mockResolvedValue([]);
     processedGroupBy.mockResolvedValue([]);
 
-    const result = await loadHealthDashboard(NOW);
+    const result = await loadHealthDashboard(ALL_SCOPE, NOW);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.data.overview.totalMailboxes).toBe(0);
@@ -366,7 +372,7 @@ describe('loadHealthDashboard', () => {
     mailboxFindMany.mockResolvedValue([]);
     processedGroupBy.mockResolvedValue([]);
 
-    await loadHealthDashboard(NOW);
+    await loadHealthDashboard(ALL_SCOPE, NOW);
 
     const call = mailboxFindMany.mock.calls[0]?.[0];
     expect(call).toBeDefined();
@@ -374,6 +380,57 @@ describe('loadHealthDashboard', () => {
     expect(call.select.microsoftUserId).toBeUndefined();
     expect(call.select.graphSubscriptions.select.clientStateHash).toBeUndefined();
     expect(call.select.graphSubscriptions.select.subscriptionId).toBeUndefined();
+    // OWNER/ADMIN scope is unrestricted — no customer filter is applied.
+    expect(call.where).toBeUndefined();
+  });
+
+  it('restricts the mailbox query to the assigned customers for STAFF', async () => {
+    mailboxFindMany.mockResolvedValue([]);
+    processedGroupBy.mockResolvedValue([]);
+
+    const staffScope: CustomerScope = {
+      kind: 'assigned',
+      customerIds: ['cust_1', 'cust_2'],
+    };
+    await loadHealthDashboard(staffScope, NOW);
+
+    const call = mailboxFindMany.mock.calls[0]?.[0];
+    expect(call.where).toEqual({ customerId: { in: ['cust_1', 'cust_2'] } });
+  });
+
+  it('fails closed for a STAFF viewer with no assignment (no global leak)', async () => {
+    mailboxFindMany.mockResolvedValue([]);
+    processedGroupBy.mockResolvedValue([]);
+
+    const emptyScope: CustomerScope = { kind: 'assigned', customerIds: [] };
+    const result = await loadHealthDashboard(emptyScope, NOW);
+
+    const call = mailboxFindMany.mock.calls[0]?.[0];
+    // An empty assigned scope filters to `in: []` → zero rows.
+    expect(call.where).toEqual({ customerId: { in: [] } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.isUnrestricted).toBe(false);
+      expect(result.data.overview.totalMailboxes).toBe(0);
+      // System-wide operational checks are never exposed to staff.
+      expect(result.data.operationalChecks).toHaveLength(0);
+    }
+  });
+
+  it('omits global operational checks for an assigned (STAFF) scope', async () => {
+    mailboxFindMany.mockResolvedValue([]);
+    processedGroupBy.mockResolvedValue([]);
+
+    const staffScope: CustomerScope = {
+      kind: 'assigned',
+      customerIds: ['cust_1'],
+    };
+    const result = await loadHealthDashboard(staffScope, NOW);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.operationalChecks).toHaveLength(0);
+      expect(result.data.isUnrestricted).toBe(false);
+    }
   });
 
   it('builds rows and sanitizes the last error message', async () => {
@@ -405,16 +462,109 @@ describe('loadHealthDashboard', () => {
       ])
       .mockResolvedValueOnce([]);
 
-    const result = await loadHealthDashboard(NOW);
+    const result = await loadHealthDashboard(ALL_SCOPE, NOW);
     expect(result.ok).toBe(true);
     if (result.ok) {
       const row = result.data.mailboxes[0];
       expect(row.level).toBe('OK');
+      expect(row.readiness).toBe('READY');
       expect(row.customerName).toBe('Customer A');
       expect(row.lastCodeSentAt?.getTime()).toBe(NOW.getTime());
       // Redaction kicked in — the raw token is gone.
       expect(row.lastErrorShort).not.toContain('abcdef1234567890');
       expect(row.lastErrorShort).toContain('[REDACTED]');
     }
+  });
+});
+
+describe('buildCustomerWorkload', () => {
+  function row(overrides: Partial<MailboxHealthRow>): MailboxHealthRow {
+    return {
+      id: 'mbx',
+      customerId: 'cust_1',
+      emailAddress: 'a@example.com',
+      ownerCustomerName: 'Customer A',
+      customerName: 'Customer A',
+      mailboxStatus: 'ACTIVE',
+      provider: 'MICROSOFT',
+      tokenStatus: 'OK',
+      telegramMappingStatus: 'ACTIVE',
+      subscriptionStatus: 'ACTIVE',
+      subscriptionExpiresAt: new Date(NOW.getTime() + 7 * 24 * 60 * 60 * 1000),
+      lastSuccessfulSyncAt: NOW,
+      lastPolledAt: NOW,
+      lastCodeSentAt: NOW,
+      readiness: 'READY',
+      recentTelegramFailureCount: 0,
+      lastErrorShort: null,
+      level: 'OK',
+      reasons: [],
+      ...overrides,
+    };
+  }
+
+  it('groups mailboxes by customer and counts readiness buckets', () => {
+    const workload = buildCustomerWorkload([
+      row({ id: 'm1', customerId: 'cust_1', readiness: 'READY' }),
+      row({ id: 'm2', customerId: 'cust_1', readiness: 'NEEDS_MAPPING' }),
+      row({ id: 'm3', customerId: 'cust_1', readiness: 'TOKEN_ISSUE' }),
+    ]);
+
+    expect(workload).toHaveLength(1);
+    const group = workload[0];
+    expect(group.customerId).toBe('cust_1');
+    expect(group.totalMailboxes).toBe(3);
+    expect(group.readyMailboxes).toBe(1);
+    expect(group.needsMapping).toBe(1);
+    expect(group.errorOrDisconnected).toBe(1);
+  });
+
+  it('counts a mailbox sharing a reusable destination as Ready (valid)', () => {
+    // Two mailboxes of the same customer each map to the SAME reusable
+    // destination; both have their own ACTIVE mapping, so both are READY.
+    const workload = buildCustomerWorkload([
+      row({ id: 'm1', telegramMappingStatus: 'ACTIVE', readiness: 'READY' }),
+      row({ id: 'm2', telegramMappingStatus: 'ACTIVE', readiness: 'READY' }),
+    ]);
+
+    expect(workload[0].readyMailboxes).toBe(2);
+    expect(workload[0].needsMapping).toBe(0);
+  });
+
+  it('never counts a disconnected mailbox as Ready', () => {
+    const workload = buildCustomerWorkload([
+      row({ id: 'm1', mailboxStatus: 'RECONNECT_REQUIRED', readiness: 'TOKEN_ISSUE' }),
+    ]);
+
+    expect(workload[0].readyMailboxes).toBe(0);
+    expect(workload[0].errorOrDisconnected).toBe(1);
+  });
+
+  it('sums recent Telegram failures into the recent-issue count', () => {
+    const workload = buildCustomerWorkload([
+      row({ id: 'm1', recentTelegramFailureCount: 2 }),
+      row({ id: 'm2', recentTelegramFailureCount: 3 }),
+    ]);
+
+    expect(workload[0].recentIssueCount).toBe(5);
+  });
+
+  it('separates customers and sorts Unassigned last', () => {
+    const workload = buildCustomerWorkload([
+      row({ id: 'm1', customerId: 'cust_b', customerName: 'Beta' }),
+      row({
+        id: 'm2',
+        customerId: null,
+        customerName: null,
+        ownerCustomerName: null,
+      }),
+      row({ id: 'm3', customerId: 'cust_a', customerName: 'Alpha' }),
+    ]);
+
+    expect(workload.map((g) => g.customerName)).toEqual([
+      'Alpha',
+      'Beta',
+      'Unassigned',
+    ]);
   });
 });

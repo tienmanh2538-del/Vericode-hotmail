@@ -1,10 +1,17 @@
+import { resolveCustomerScope } from '@/lib/auth/access-scope';
+import { requireAdminAccess } from '@/lib/auth/guards';
 import { loadHealthDashboard } from '@/services/health/health.service';
 import type {
+  CustomerWorkloadRow,
   HealthLevel,
   MailboxHealthRow,
   OperationalCheck,
   OperationalCheckStatus,
 } from '@/services/health/health.types';
+import {
+  READINESS_LABEL,
+  type MailboxReadiness,
+} from '@/lib/mailboxes/mailbox-list-filter';
 import '../admin.css';
 import './health.css';
 
@@ -39,6 +46,10 @@ function CheckBadge({ status }: { status: OperationalCheckStatus }) {
   return <span className={CHECK_CLASS[status]}>{status}</span>;
 }
 
+function ReadinessText({ readiness }: { readiness: MailboxReadiness }) {
+  return <>{READINESS_LABEL[readiness]}</>;
+}
+
 interface OverviewCardProps {
   label: string;
   value: string | number;
@@ -60,7 +71,45 @@ function OverviewCard({ label, value, tone = 'neutral' }: OverviewCardProps) {
   );
 }
 
+function WorkloadSection({ rows }: { rows: CustomerWorkloadRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <section className="health-section" aria-labelledby="health-workload-heading">
+      <h3 id="health-workload-heading" className="health-section__title">
+        Workload by customer
+      </h3>
+      <div className="health-table-wrap">
+        <table className="health-table">
+          <thead>
+            <tr>
+              <th scope="col">Customer</th>
+              <th scope="col">Total mailboxes</th>
+              <th scope="col">Ready</th>
+              <th scope="col">Needs mapping</th>
+              <th scope="col">Error / disconnected</th>
+              <th scope="col">Recent issues (24h)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.customerId ?? `unassigned:${row.customerName}`}>
+                <td>{row.customerName}</td>
+                <td>{row.totalMailboxes}</td>
+                <td>{row.readyMailboxes}</td>
+                <td>{row.needsMapping}</td>
+                <td>{row.errorOrDisconnected}</td>
+                <td>{row.recentIssueCount}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function OperationalChecksSection({ checks }: { checks: OperationalCheck[] }) {
+  if (checks.length === 0) return null;
   return (
     <section className="health-section" aria-labelledby="health-ops-heading">
       <h3 id="health-ops-heading" className="health-section__title">
@@ -85,14 +134,15 @@ function MailboxHealthTable({ mailboxes }: { mailboxes: MailboxHealthRow[] }) {
   return (
     <section className="health-section" aria-labelledby="health-mailboxes-heading">
       <h3 id="health-mailboxes-heading" className="health-section__title">
-        Mailbox health
+        Mailbox issues
       </h3>
       <div className="health-table-wrap">
         <table className="health-table">
           <thead>
             <tr>
               <th scope="col">Email</th>
-              <th scope="col">Owner</th>
+              <th scope="col">Customer</th>
+              <th scope="col">Readiness</th>
               <th scope="col">Mailbox</th>
               <th scope="col">Token</th>
               <th scope="col">Telegram</th>
@@ -110,6 +160,9 @@ function MailboxHealthTable({ mailboxes }: { mailboxes: MailboxHealthRow[] }) {
               <tr key={row.id}>
                 <td>{row.emailAddress}</td>
                 <td>{row.customerName ?? row.ownerCustomerName ?? '—'}</td>
+                <td>
+                  <ReadinessText readiness={row.readiness} />
+                </td>
                 <td>{row.mailboxStatus}</td>
                 <td>{row.tokenStatus}</td>
                 <td>{row.telegramMappingStatus ?? 'None'}</td>
@@ -134,7 +187,41 @@ function MailboxHealthTable({ mailboxes }: { mailboxes: MailboxHealthRow[] }) {
 }
 
 export default async function HealthDashboardPage() {
-  const result = await loadHealthDashboard();
+  // TASK-056 — STAFF_READ_ONLY only sees the operational health of mailboxes
+  // belonging to their assigned customers. Scope is enforced in the service
+  // layer (loadHealthDashboard); the UI only decides how to present the result.
+  const user = await requireAdminAccess();
+  const scope = await resolveCustomerScope(user);
+
+  // Staff with no assignment must see a safe empty state — never a global view.
+  const hasNoAssignment =
+    scope.kind === 'assigned' && scope.customerIds.length === 0;
+
+  if (hasNoAssignment) {
+    return (
+      <>
+        <div className="health-header">
+          <div>
+            <h2 className="admin-page__heading">Health Dashboard</h2>
+            <p className="health-subtitle">
+              Tình trạng vận hành của mailbox trong phạm vi được phân công.
+            </p>
+          </div>
+        </div>
+        <div className="mailboxes-empty">
+          <h3 className="mailboxes-empty__title">
+            Bạn chưa được phân công customer nào.
+          </h3>
+          <p className="mailboxes-empty__description">
+            Khi được OWNER/ADMIN phân công, health của các mailbox tương ứng sẽ
+            hiển thị ở đây.
+          </p>
+        </div>
+      </>
+    );
+  }
+
+  const result = await loadHealthDashboard(scope);
 
   return (
     <>
@@ -142,8 +229,8 @@ export default async function HealthDashboardPage() {
         <div>
           <h2 className="admin-page__heading">Health Dashboard</h2>
           <p className="health-subtitle">
-            Tổng quan tình trạng vận hành: mailbox, Microsoft Graph subscription,
-            delta polling, email worker và Telegram delivery.
+            Tổng quan tình trạng vận hành: mailbox readiness, mapping, Microsoft
+            Graph subscription, delta polling và Telegram delivery.
           </p>
         </div>
         {result.ok ? <HealthBadge level={result.data.overview.overall} /> : null}
@@ -177,8 +264,22 @@ export default async function HealthDashboardPage() {
               value={result.data.overview.totalMailboxes}
             />
             <OverviewCard
+              label="Ready"
+              value={result.data.overview.readyMailboxes}
+            />
+            <OverviewCard
               label="Active mailboxes"
               value={result.data.overview.activeMailboxes}
+            />
+            <OverviewCard
+              label="Needs mapping"
+              value={result.data.overview.needsMapping}
+              tone={result.data.overview.needsMapping > 0 ? 'warning' : 'neutral'}
+            />
+            <OverviewCard
+              label="Needs customer"
+              value={result.data.overview.needsCustomer}
+              tone={result.data.overview.needsCustomer > 0 ? 'warning' : 'neutral'}
             />
             <OverviewCard
               label="Reconnect required"
@@ -201,16 +302,6 @@ export default async function HealthDashboardPage() {
               tone={result.data.overview.subscriptionExpiringSoon > 0 ? 'warning' : 'neutral'}
             />
             <OverviewCard
-              label="Missing Telegram mapping"
-              value={result.data.overview.missingTelegramMapping}
-              tone={result.data.overview.missingTelegramMapping > 0 ? 'warning' : 'neutral'}
-            />
-            <OverviewCard
-              label="Polling stale"
-              value={result.data.overview.pollingStale}
-              tone={result.data.overview.pollingStale > 0 ? 'warning' : 'neutral'}
-            />
-            <OverviewCard
               label="Telegram failures (24h)"
               value={result.data.overview.recentTelegramFailures}
               tone={result.data.overview.recentTelegramFailures > 0 ? 'critical' : 'neutral'}
@@ -223,14 +314,6 @@ export default async function HealthDashboardPage() {
               label="Last processed email"
               value={formatDateTime(result.data.overview.lastProcessedEmailAt)}
             />
-            <OverviewCard
-              label="Last polling run"
-              value={formatDateTime(result.data.overview.lastPollingRunAt)}
-            />
-            <OverviewCard
-              label="Last renewal run"
-              value={formatDateTime(result.data.overview.lastRenewalRunAt)}
-            />
           </section>
 
           {result.data.overview.lastErrorShort ? (
@@ -238,6 +321,8 @@ export default async function HealthDashboardPage() {
               <strong>Last error:</strong> {result.data.overview.lastErrorShort}
             </div>
           ) : null}
+
+          <WorkloadSection rows={result.data.workload} />
 
           <OperationalChecksSection checks={result.data.operationalChecks} />
 
