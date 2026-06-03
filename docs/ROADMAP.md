@@ -186,7 +186,7 @@ Các nguyên tắc sau áp dụng cho **mọi** task từ TASK-042 đến TASK-0
 
 ## Sprint 13 — Scale readiness
 
-- TASK-054: Scale test plan for 100–200 mailboxes per staff
+- TASK-054: Scale test plan for 100–200 mailboxes per staff — done (planning artifact). Scale test plan / readiness plan an toàn cho mức 50/100/200 mailbox per staff bằng dữ liệu giả lập (mock/seed/staging fake), không live scale, không production resource, không mailbox/Telegram group khách hàng thật, không gửi code thật. Báo gồm baseline (worker concurrency mặc định 2, delta polling 30s / max 10 pages, subscription renewal 15 phút, Telegram retry 4 lần backoff 5/15/30s), test data model, scenarios A–E, metrics (queue backlog, worker latency, delta polling, Graph throttling, Telegram failure, UI, readiness), risk analysis, safe execution checklist. Nhu cầu per-mailbox/per-destination throttling & queue safety chuyển TASK-055; observability realtime chuyển TASK-056. Xem `docs/tasks/TASK-054-scale-test-plan-100-200-mailboxes.md` và `docs/reports/TASK-054-scale-test-plan-100-200-mailboxes.md`.
 - TASK-055: Per-mailbox throttling & queue safety
 - TASK-056: Operational health dashboard for staff workload
 
