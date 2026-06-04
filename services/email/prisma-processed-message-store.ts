@@ -6,8 +6,10 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 
 import { prisma as defaultPrisma } from '@/lib/prisma';
+import { isUniqueConstraintError } from '@/lib/db/prisma-error';
 import {
   DEFAULT_BUCKET_MINUTES,
+  ProcessedMessageDuplicateError,
   type CreateProcessedMessageInput,
   type ProcessedMessageRecord,
   type ProcessedMessageStatus,
@@ -101,20 +103,31 @@ export function createPrismaProcessedMessageStore(
       return row ? toRecord(row as MinimalPrismaRow) : null;
     },
     async create(input: CreateProcessedMessageInput) {
-      const row = await client.processedMessage.create({
-        data: {
-          mailboxId: input.mailboxId,
-          graphMessageId: input.graphMessageId,
-          internetMessageId: input.internetMessageId,
-          codeHash: input.codeHash,
-          receivedAt: input.receivedAt,
-          // Schema requires senderEmail; persist an empty marker when callers
-          // omit it (e.g. mock flows) rather than failing the dedup claim.
-          senderEmail: input.senderEmail ?? '',
-          subjectHash: input.subjectHash,
-        },
-      });
-      return toRecord(row as MinimalPrismaRow);
+      try {
+        const row = await client.processedMessage.create({
+          data: {
+            mailboxId: input.mailboxId,
+            graphMessageId: input.graphMessageId,
+            internetMessageId: input.internetMessageId,
+            codeHash: input.codeHash,
+            receivedAt: input.receivedAt,
+            // Schema requires senderEmail; persist an empty marker when callers
+            // omit it (e.g. mock flows) rather than failing the dedup claim.
+            senderEmail: input.senderEmail ?? '',
+            subjectHash: input.subjectHash,
+          },
+        });
+        return toRecord(row as MinimalPrismaRow);
+      } catch (err) {
+        // TASK-068A — the @@unique([mailboxId, graphMessageId]) rejected a racing
+        // insert (P2002). Surface it as a typed duplicate so the dedup claim can
+        // treat it as a clean skip instead of letting BullMQ retry the message a
+        // sibling flow already claimed. Other errors propagate unchanged.
+        if (isUniqueConstraintError(err)) {
+          throw new ProcessedMessageDuplicateError();
+        }
+        throw err;
+      }
     },
     async markSent(processedMessageId, sentAt) {
       await client.processedMessage.update({

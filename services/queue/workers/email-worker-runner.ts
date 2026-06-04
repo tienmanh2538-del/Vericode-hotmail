@@ -31,10 +31,8 @@ import {
 } from '@/services/email/graph-message-pipeline.service';
 import { recordCodeEventToDb } from '@/services/logs/prisma-code-event-store';
 import { createAuditLogInDb } from '@/services/logs/prisma-audit-log-store';
-import {
-  createInMemoryMailboxProcessingLock,
-  type MailboxProcessingLock,
-} from '@/services/queue/mailbox-processing-lock';
+import { type MailboxProcessingLock } from '@/services/queue/mailbox-processing-lock';
+import { createMailboxProcessingLock } from '@/services/queue/mailbox-lock-factory';
 import {
   createInMemoryDestinationThrottle,
   type DestinationThrottle,
@@ -47,8 +45,14 @@ const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
 // the per-mailbox lock map and the per-destination spacing map are shared state.
 // Building them here (not per job) is what makes the guards effective. Both are
 // pure in-memory structures with no import-time I/O.
+// TASK-068A — built via the factory so the lock backend is a single switch. With
+// no Redis client supplied it returns the in-memory lock (unchanged production
+// behaviour, single-worker baseline). To enable cross-process serialisation for
+// multiple worker replicas, pass a shared Redis client:
+//   createMailboxProcessingLock({ redisClient: <shared ioredis client> })
+// (the client is intentionally NOT auto-created here — see mailbox-lock-factory).
 const sharedMailboxProcessingLock: MailboxProcessingLock =
-  createInMemoryMailboxProcessingLock();
+  createMailboxProcessingLock();
 const sharedDestinationThrottle: DestinationThrottle =
   createInMemoryDestinationThrottle();
 

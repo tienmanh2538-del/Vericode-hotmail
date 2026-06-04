@@ -22,15 +22,36 @@
 export const DEFAULT_MAILBOX_LOCK_TTL_MS = 60_000;
 
 export interface MailboxLockHandle {
-  /** Release the lock. Safe to call multiple times; only the first call acts. */
-  release(): void;
+  /**
+   * Release the lock. Safe to call multiple times; only the first call acts.
+   * Returns `void` for the in-memory lock and a `Promise` for the Redis-backed
+   * lock (TASK-068A); callers should `await` it to stay agnostic.
+   */
+  release(): void | Promise<void>;
 }
 
 export interface MailboxProcessingLock {
   /**
    * Try to acquire the lock for `mailboxId`. Returns a handle on success, or
    * `null` when the mailbox is already locked by another in-flight job.
+   *
+   * TASK-068A — the return type allows a `Promise` so a cross-process
+   * (Redis-backed) lock can satisfy the same interface as the in-memory one. The
+   * in-memory implementation stays synchronous; callers `await` the result so
+   * either backend works without branching.
    */
+  acquire(
+    mailboxId: string,
+  ): MailboxLockHandle | null | Promise<MailboxLockHandle | null>;
+}
+
+/**
+ * Synchronous specialisation of {@link MailboxProcessingLock}. The in-memory lock
+ * returns this narrower type so direct callers (and existing tests) keep a
+ * synchronous handle, while it stays assignable to the async-capable interface
+ * the pipeline awaits.
+ */
+export interface SyncMailboxProcessingLock {
   acquire(mailboxId: string): MailboxLockHandle | null;
 }
 
@@ -48,7 +69,7 @@ export interface InMemoryMailboxLockOptions {
  */
 export function createInMemoryMailboxProcessingLock(
   options: InMemoryMailboxLockOptions = {},
-): MailboxProcessingLock {
+): SyncMailboxProcessingLock {
   const ttlMs =
     typeof options.ttlMs === 'number' && options.ttlMs > 0
       ? options.ttlMs

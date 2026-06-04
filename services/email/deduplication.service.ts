@@ -1,5 +1,22 @@
 import { hashSensitiveValue } from '@/lib/security/redact';
 
+// TASK-068A — raised by a `ProcessedMessageStore.create` when the underlying
+// store rejects the insert because a row for the SAME (mailboxId, graphMessageId)
+// already exists. The Prisma-backed store maps a P2002 unique-constraint
+// violation onto this; the in-memory store enforces the same invariant. It lets
+// `claimMessageForProcessing` turn a lost race (webhook vs delta polling, or two
+// worker replicas) into a clean duplicate skip instead of an unhandled throw.
+export class ProcessedMessageDuplicateError extends Error {
+  constructor() {
+    super('ProcessedMessage already exists for this mailbox/graphMessageId');
+    this.name = 'ProcessedMessageDuplicateError';
+  }
+}
+
+export function isProcessedMessageDuplicateError(err: unknown): boolean {
+  return err instanceof ProcessedMessageDuplicateError;
+}
+
 export type DeduplicationInput = {
   mailboxId: string;
   graphMessageId?: string | null;
@@ -317,16 +334,43 @@ export async function claimMessageForProcessing(
 
   if (!effectiveGraphMessageId) return invalidInputResult();
 
-  const record = await store.create({
-    mailboxId,
-    graphMessageId: effectiveGraphMessageId,
-    internetMessageId,
-    codeHash,
-    receivedAt: receivedAtDate ?? new Date(),
-    receivedAtBucket,
-    senderEmail,
-    subjectHash,
-  });
+  let record: ProcessedMessageRecord;
+  try {
+    record = await store.create({
+      mailboxId,
+      graphMessageId: effectiveGraphMessageId,
+      internetMessageId,
+      codeHash,
+      receivedAt: receivedAtDate ?? new Date(),
+      receivedAtBucket,
+      senderEmail,
+      subjectHash,
+    });
+  } catch (err) {
+    // TASK-068A — exactly-once backstop. The duplicate check above passed, but a
+    // concurrent flow (webhook vs delta polling, or a second worker replica)
+    // inserted the SAME message between our check and our insert. The store's
+    // unique constraint rejects our insert; treat it as a clean duplicate skip so
+    // the caller does NOT relay a second time and the worker does NOT retry a
+    // message another flow already owns. Never re-throw a duplicate. No raw code
+    // or email body is touched here.
+    if (isProcessedMessageDuplicateError(err)) {
+      const settled = await checkProcessedMessageDuplicate(input, store);
+      if (settled.isDuplicate) return settled;
+      const existing = await store.findByGraphMessageId(
+        mailboxId,
+        effectiveGraphMessageId,
+      );
+      return {
+        shouldProcess: false,
+        isDuplicate: true,
+        reason: 'DUPLICATE_GRAPH_MESSAGE_ID',
+        processedMessageId: existing?.id,
+        dedupeKey: buildProcessedMessageDedupeKey(input),
+      };
+    }
+    throw err;
+  }
 
   return {
     shouldProcess: true,
@@ -381,6 +425,16 @@ export function createInMemoryProcessedMessageStore(): ProcessedMessageStore {
       );
     },
     async create(input) {
+      // Mirror the DB's @@unique([mailboxId, graphMessageId]) so tests can
+      // exercise the same exactly-once race the Prisma store guards against.
+      const clash = records.find(
+        (r) =>
+          r.mailboxId === input.mailboxId &&
+          r.graphMessageId === input.graphMessageId,
+      );
+      if (clash) {
+        throw new ProcessedMessageDuplicateError();
+      }
       counter += 1;
       const record: ProcessedMessageRecord = {
         id: `pm_${counter}`,

@@ -167,8 +167,17 @@ model TelegramMapping {
 
   // Keeps a single mailbox from holding duplicate rows to the SAME chat. It does
   // NOT (and must not) prevent different mailboxes from sharing a chat id — that
-  // is the whole point of TASK-041. "One active destination per mailbox" is
-  // enforced in the service layer, not by a DB unique.
+  // is the whole point of TASK-041.
+  //
+  // TASK-068A — "at most one ACTIVE mapping per mailbox" is now ALSO enforced at
+  // the DB level by a PARTIAL unique index on (mailboxId) WHERE status = 'ACTIVE'.
+  // Prisma's schema language cannot express a partial (filtered) unique index, so
+  // it lives in the raw migration
+  // `20260604000000_task068a_one_active_telegram_mapping` and is intentionally
+  // absent here. DISABLED mappings stay unconstrained, so "many mailboxes share
+  // one reusable destination" is unaffected. Note for maintainers: a future
+  // `prisma migrate dev` may report this index as drift because the schema does
+  // not declare it — keep it; do not let an auto-generated migration drop it.
   @@unique([mailboxId, telegramChatId])
   // Speeds up "how many mailboxes route to this destination" lookups for the UI.
   @@index([telegramChatId])

@@ -375,7 +375,11 @@ export async function processGraphMessageJob(
   // side effect so two jobs for the same mailbox never run the pipeline in
   // parallel. When the mailbox is busy the job defers (the worker treats
   // DEFERRED_MAILBOX_BUSY as retryable) instead of calling Graph/Telegram now.
-  const lockHandle = deps.lock ? deps.lock.acquire(normalized.mailboxId) : null;
+  // TASK-068A — `acquire` may be async (Redis-backed lock) or sync (in-memory).
+  // Awaiting handles both; a sync lock's value passes straight through.
+  const lockHandle = deps.lock
+    ? await deps.lock.acquire(normalized.mailboxId)
+    : null;
   if (deps.lock && !lockHandle) {
     logger.info('Graph message job deferred: mailbox is busy', {
       mailboxId: normalized.mailboxId,
@@ -393,8 +397,9 @@ export async function processGraphMessageJob(
     return await processActiveMailboxJob(normalized, baseResultKeys, deps);
   } finally {
     // Always release — even when the pipeline throws unexpectedly — so a single
-    // failed job can never wedge the mailbox.
-    lockHandle?.release();
+    // failed job can never wedge the mailbox. `release` may be async (Redis) or
+    // sync (in-memory); awaiting covers both.
+    await lockHandle?.release();
   }
 }
 

@@ -2,6 +2,10 @@ import { prisma } from '@/lib/prisma';
 import type { CustomerScope } from '@/lib/auth/access-scope';
 import { scopeAllowsCustomer } from '@/lib/auth/access-scope';
 import {
+  isUniqueConstraintError,
+  uniqueConstraintTargetIncludes,
+} from '@/lib/db/prisma-error';
+import {
   validateTelegramMappingInput,
   validateTelegramDestinationMappingInput,
   type RawTelegramMappingInput,
@@ -395,6 +399,42 @@ async function resolveDestinationMapping(
   };
 }
 
+// TASK-068A — DB-level backstop for the check-then-write (TOCTOU) race that
+// `assertNoConflictForDestination` alone cannot close: two near-simultaneous
+// creates/updates for the same mailbox can both pass the in-memory pre-check
+// before either row lands. The migration
+// `20260604000000_task068a_one_active_telegram_mapping` adds a PARTIAL unique
+// index on (mailboxId) WHERE status = 'ACTIVE', so the database itself rejects a
+// second ACTIVE row with P2002. Here we translate that P2002 back into the same
+// friendly conflict the pre-check raises, so the loser of the race gets a clean
+// 409 instead of an unhandled 500. The existing @@unique([mailboxId,
+// telegramChatId]) is reported separately and mapped to the duplicate-target
+// message. A transaction is intentionally NOT used: under READ COMMITTED a
+// check+insert in one transaction would still race, so the unique index — not a
+// transaction — is the real serialisation point.
+async function writeMappingWithActiveGuard(
+  status: TelegramMappingStatus,
+  write: () => Promise<MappingRow>,
+): Promise<TelegramMappingRecord> {
+  try {
+    return toRecord(await write());
+  } catch (err) {
+    if (isUniqueConstraintError(err)) {
+      if (status === 'ACTIVE' && uniqueConstraintTargetIncludes(err, 'active')) {
+        throw new TelegramDestinationMappingConflictError(
+          'mailboxId',
+          'This mailbox already has an active Telegram mapping. Disable it before adding another.',
+        );
+      }
+      throw new TelegramDestinationMappingConflictError(
+        'destinationId',
+        'This mailbox is already mapped to this destination.',
+      );
+    }
+    throw err;
+  }
+}
+
 export async function createTelegramMappingFromDestination(
   raw: RawTelegramDestinationMappingInput,
   scope?: CustomerScope,
@@ -403,19 +443,20 @@ export async function createTelegramMappingFromDestination(
 
   await assertNoConflictForDestination(resolved);
 
-  const row = await prisma.telegramMapping.create({
-    data: {
-      mailboxId: resolved.mailboxId,
-      destinationId: resolved.destinationId,
-      telegramChatId: resolved.snapshot.telegramChatId,
-      telegramGroupName: resolved.snapshot.telegramGroupName,
-      telegramThreadId: resolved.snapshot.telegramThreadId,
-      telegramTopicName: resolved.snapshot.telegramTopicName,
-      status: resolved.status,
-    },
-    include: INCLUDE_MAILBOX,
-  });
-  return toRecord(row);
+  return writeMappingWithActiveGuard(resolved.status, () =>
+    prisma.telegramMapping.create({
+      data: {
+        mailboxId: resolved.mailboxId,
+        destinationId: resolved.destinationId,
+        telegramChatId: resolved.snapshot.telegramChatId,
+        telegramGroupName: resolved.snapshot.telegramGroupName,
+        telegramThreadId: resolved.snapshot.telegramThreadId,
+        telegramTopicName: resolved.snapshot.telegramTopicName,
+        status: resolved.status,
+      },
+      include: INCLUDE_MAILBOX,
+    }),
+  );
 }
 
 export async function updateTelegramMappingFromDestination(
@@ -432,20 +473,21 @@ export async function updateTelegramMappingFromDestination(
 
   await assertNoConflictForDestination(resolved, { excludeId: id });
 
-  const row = await prisma.telegramMapping.update({
-    where: { id },
-    data: {
-      mailboxId: resolved.mailboxId,
-      destinationId: resolved.destinationId,
-      telegramChatId: resolved.snapshot.telegramChatId,
-      telegramGroupName: resolved.snapshot.telegramGroupName,
-      telegramThreadId: resolved.snapshot.telegramThreadId,
-      telegramTopicName: resolved.snapshot.telegramTopicName,
-      status: resolved.status,
-    },
-    include: INCLUDE_MAILBOX,
-  });
-  return toRecord(row);
+  return writeMappingWithActiveGuard(resolved.status, () =>
+    prisma.telegramMapping.update({
+      where: { id },
+      data: {
+        mailboxId: resolved.mailboxId,
+        destinationId: resolved.destinationId,
+        telegramChatId: resolved.snapshot.telegramChatId,
+        telegramGroupName: resolved.snapshot.telegramGroupName,
+        telegramThreadId: resolved.snapshot.telegramThreadId,
+        telegramTopicName: resolved.snapshot.telegramTopicName,
+        status: resolved.status,
+      },
+      include: INCLUDE_MAILBOX,
+    }),
+  );
 }
 
 // Reuses the same invariants as the legacy path (no duplicate (mailbox, chat)
