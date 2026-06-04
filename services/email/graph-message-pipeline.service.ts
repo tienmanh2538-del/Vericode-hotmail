@@ -40,11 +40,15 @@ import {
   type AuditLogAction,
   type CreateAuditLogInput,
 } from '@/services/logs/audit-log.service';
-import type { MailboxProcessingLock } from '@/services/queue/mailbox-processing-lock';
+import type {
+  MailboxLockHandle,
+  MailboxProcessingLock,
+} from '@/services/queue/mailbox-processing-lock';
 import {
   buildDestinationKey,
   type DestinationThrottle,
 } from '@/services/queue/destination-throttle';
+import type { GlobalSendThrottle } from '@/services/queue/global-send-throttle';
 import { createLogger, type Logger } from '@/lib/logger';
 
 const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
@@ -166,6 +170,23 @@ export interface GraphMessagePipelineDeps {
   // TASK-055 — shared-destination burst guard. When present, the job spaces its
   // Telegram send against other sends to the same chat/topic. Absent ⇒ no delay.
   destinationThrottle?: DestinationThrottle;
+  // TASK-068B — global bot send pacer. When present, the job also paces its send
+  // against ALL other bot sends (not just the same destination) so a burst across
+  // many different destinations cannot trip Telegram's global bot rate limit.
+  // Absent ⇒ no extra delay. Bounded by the pacer's own cap.
+  globalSendThrottle?: GlobalSendThrottle;
+  // TASK-068B — bounded fairness retry when the per-mailbox lock is busy. When
+  // present (and a lock is configured), the job re-tries acquiring the lock a few
+  // times with a short delay BEFORE deferring, so a transient in-flight job for
+  // the same mailbox does not force an immediate queue re-attempt (thrash). It is
+  // strictly bounded by both `maxRetries` and `maxTotalWaitMs` — never an infinite
+  // loop. It only re-acquires the lock; it never claims/dedups while busy, so it
+  // cannot affect exactly-once. Absent ⇒ defer immediately (TASK-055 behaviour).
+  busyDeferRetry?: {
+    maxRetries: number;
+    delayMs: number;
+    maxTotalWaitMs: number;
+  };
   // Injectable sleep so the throttle delay is instant under test.
   sleep?: (ms: number) => Promise<void>;
 }
@@ -185,6 +206,43 @@ function isNonEmptyString(value: unknown): value is string {
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * TASK-068B — acquire the per-mailbox lock with an optional, strictly-bounded
+ * fairness retry. Without `busyDeferRetry` this is a single acquire (unchanged
+ * TASK-055 behaviour). With it, a busy lock is re-tried a few times with a short
+ * delay so a quickly-finishing in-flight job lets this job proceed in place
+ * instead of bouncing back to the queue (thrash). Bounded by BOTH `maxRetries`
+ * and `maxTotalWaitMs`, so it can never loop forever or hold a worker slot
+ * unboundedly. It only re-acquires the lock — it never claims a message while
+ * busy, so exactly-once (TASK-068A) is untouched.
+ */
+async function acquireMailboxLockWithFairness(
+  lock: NonNullable<GraphMessagePipelineDeps['lock']>,
+  mailboxId: string,
+  busyDeferRetry: GraphMessagePipelineDeps['busyDeferRetry'],
+  sleep: (ms: number) => Promise<void>,
+): Promise<MailboxLockHandle | null> {
+  const first = await lock.acquire(mailboxId);
+  if (first || !busyDeferRetry) return first;
+
+  const maxRetries = Math.max(0, Math.floor(busyDeferRetry.maxRetries));
+  const delayMs = Math.max(0, busyDeferRetry.delayMs);
+  const maxTotalWaitMs = Math.max(0, busyDeferRetry.maxTotalWaitMs);
+
+  let waited = 0;
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    const remaining = maxTotalWaitMs - waited;
+    if (remaining <= 0) break;
+    const thisDelay = Math.min(delayMs, remaining);
+    if (thisDelay <= 0) break;
+    await sleep(thisDelay);
+    waited += thisDelay;
+    const handle = await lock.acquire(mailboxId);
+    if (handle) return handle;
+  }
+  return null;
 }
 
 function trimOrNull(value: unknown): string | null {
@@ -377,8 +435,16 @@ export async function processGraphMessageJob(
   // DEFERRED_MAILBOX_BUSY as retryable) instead of calling Graph/Telegram now.
   // TASK-068A — `acquire` may be async (Redis-backed lock) or sync (in-memory).
   // Awaiting handles both; a sync lock's value passes straight through.
+  // TASK-068B — when `busyDeferRetry` is configured, acquisition uses a bounded
+  // fairness retry to cut DEFERRED_MAILBOX_BUSY thrash; otherwise it is a single
+  // acquire exactly as before.
   const lockHandle = deps.lock
-    ? await deps.lock.acquire(normalized.mailboxId)
+    ? await acquireMailboxLockWithFairness(
+        deps.lock,
+        normalized.mailboxId,
+        deps.busyDeferRetry,
+        deps.sleep ?? defaultSleep,
+      )
     : null;
   if (deps.lock && !lockHandle) {
     logger.info('Graph message job deferred: mailbox is busy', {
@@ -907,6 +973,22 @@ async function processActiveMailboxJob(
     const { waitMs } = deps.destinationThrottle.reserve(destinationKey);
     if (waitMs > 0) {
       logger.info('Throttling Telegram send for shared destination', {
+        mailboxId: mailbox.id,
+        waitMs,
+      });
+      const sleep = deps.sleep ?? defaultSleep;
+      await sleep(waitMs);
+    }
+  }
+
+  // TASK-068B — global bot pacing. After the per-destination spacing, also pace
+  // against ALL bot sends so a burst spread across many different destinations
+  // cannot trip Telegram's global bot rate limit. This wait is independently
+  // capped by the pacer, so total delay stays bounded and routing is unchanged.
+  if (deps.globalSendThrottle) {
+    const { waitMs } = deps.globalSendThrottle.reserve();
+    if (waitMs > 0) {
+      logger.info('Pacing Telegram send for global bot rate limit', {
         mailboxId: mailbox.id,
         waitMs,
       });

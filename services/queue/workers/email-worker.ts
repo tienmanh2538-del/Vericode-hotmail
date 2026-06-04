@@ -1,6 +1,6 @@
 import { Worker, type Job } from 'bullmq';
 
-import { loadQueueEnv } from '@/lib/env';
+import { loadEmailWorkerRateLimitEnv, loadQueueEnv } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
 import type {
   GraphMessagePipelineDeps,
@@ -151,6 +151,12 @@ export interface CreateEmailWorkerOptions {
   /** Override concurrency (defaults to EMAIL_WORKER_CONCURRENCY env). */
   concurrency?: number;
   /**
+   * TASK-068B — override the queue rate limiter. Defaults to the env-configured
+   * limiter (EMAIL_WORKER_RATE_MAX per EMAIL_WORKER_RATE_DURATION_MS). The
+   * limiter only delays job starts; it never fails or infinitely retries a job.
+   */
+  limiter?: { max: number; duration: number };
+  /**
    * Custom pipeline implementation. Tests inject a fake; the worker script
    * passes a Prisma/Graph/Telegram-backed default constructed elsewhere.
    */
@@ -170,12 +176,20 @@ export function createEmailWorker(
   const concurrency = options.concurrency ?? emailWorkerConcurrency;
   const pipeline = options.pipeline;
 
+  // TASK-068B — queue-level rate limiter. Caps how many jobs the worker starts
+  // per window so overlapping webhook + delta-polling bursts at scale do not
+  // stampede Microsoft Graph / Telegram. BullMQ delays (never drops/fails) jobs
+  // that exceed the window, so this can never cause an infinite retry loop.
+  const { max, durationMs } = loadEmailWorkerRateLimitEnv();
+  const limiter = options.limiter ?? { max, duration: durationMs };
+
   const worker = new Worker<EmailJobData>(
     queueName,
     (job) => processEmailWebhookJob(job, pipeline),
     {
       connection: getRedisConnectionOptions(),
       concurrency,
+      limiter,
     },
   );
 

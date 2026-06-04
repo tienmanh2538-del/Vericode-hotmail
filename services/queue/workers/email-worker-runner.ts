@@ -37,6 +37,10 @@ import {
   createInMemoryDestinationThrottle,
   type DestinationThrottle,
 } from '@/services/queue/destination-throttle';
+import {
+  createInMemoryGlobalSendThrottle,
+  type GlobalSendThrottle,
+} from '@/services/queue/global-send-throttle';
 import type { EmailWorkerPipeline } from './email-worker';
 
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
@@ -55,6 +59,23 @@ const sharedMailboxProcessingLock: MailboxProcessingLock =
   createMailboxProcessingLock();
 const sharedDestinationThrottle: DestinationThrottle =
   createInMemoryDestinationThrottle();
+// TASK-068B — one process-wide bot pacer shared across every job so all sends
+// pace against the same global slot (Telegram's ~30/s per-bot ceiling), on top
+// of the per-destination spacing above. Defaults are conservative and capped.
+const sharedGlobalSendThrottle: GlobalSendThrottle =
+  createInMemoryGlobalSendThrottle();
+
+// TASK-068B — conservative bounded fairness for a busy per-mailbox lock. Instead
+// of immediately deferring (→ a queue re-attempt with backoff, burning an
+// attempt), a job waits briefly in place so a quickly-finishing in-flight job
+// for the same mailbox lets it proceed. Strictly bounded: at most 2 retries and
+// at most 1s total wait, then it defers as before. Never infinite, never holds a
+// worker slot longer than the cap, never claims while busy (exactly-once intact).
+const DEFAULT_BUSY_DEFER_RETRY = {
+  maxRetries: 2,
+  delayMs: 250,
+  maxTotalWaitMs: 1_000,
+} as const;
 
 // ---------------------------------------------------------------------------
 // Mailbox lookup port
@@ -249,6 +270,11 @@ export function buildDefaultEmailPipelineDeps(
     lock: overrides.lock ?? sharedMailboxProcessingLock,
     destinationThrottle:
       overrides.destinationThrottle ?? sharedDestinationThrottle,
+    // TASK-068B — global bot pacing + bounded busy-defer fairness. Both are
+    // overridable for tests; production uses the shared singletons/defaults.
+    globalSendThrottle:
+      overrides.globalSendThrottle ?? sharedGlobalSendThrottle,
+    busyDeferRetry: overrides.busyDeferRetry ?? DEFAULT_BUSY_DEFER_RETRY,
     sleep: overrides.sleep,
   };
 }

@@ -34,6 +34,11 @@ export interface EnvValues {
   REDIS_URL?: string;
   EMAIL_QUEUE_NAME?: string;
   EMAIL_WORKER_CONCURRENCY?: string;
+  // TASK-068B — queue-level rate limiter (BullMQ worker `limiter`). Caps how many
+  // jobs the worker may start per window so a burst of webhook + delta-polling
+  // jobs cannot stampede Microsoft Graph / Telegram. Both have safe defaults.
+  EMAIL_WORKER_RATE_MAX?: string;
+  EMAIL_WORKER_RATE_DURATION_MS?: string;
   DELTA_POLLING_ENABLED?: string;
   DELTA_POLLING_INTERVAL_SECONDS?: string;
   DELTA_POLLING_MAX_PAGES_PER_MAILBOX?: string;

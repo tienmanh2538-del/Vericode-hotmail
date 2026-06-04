@@ -77,6 +77,8 @@ export function loadEnv(
     REDIS_URL: pickString(source.REDIS_URL),
     EMAIL_QUEUE_NAME: pickString(source.EMAIL_QUEUE_NAME),
     EMAIL_WORKER_CONCURRENCY: pickString(source.EMAIL_WORKER_CONCURRENCY),
+    EMAIL_WORKER_RATE_MAX: pickString(source.EMAIL_WORKER_RATE_MAX),
+    EMAIL_WORKER_RATE_DURATION_MS: pickString(source.EMAIL_WORKER_RATE_DURATION_MS),
     DELTA_POLLING_ENABLED: pickString(source.DELTA_POLLING_ENABLED),
     DELTA_POLLING_INTERVAL_SECONDS: pickString(
       source.DELTA_POLLING_INTERVAL_SECONDS,
@@ -180,6 +182,11 @@ export function requireGraphSubscriptionEnv(
 const DEFAULT_REDIS_URL = 'redis://127.0.0.1:6379';
 const DEFAULT_EMAIL_QUEUE_NAME = 'email-processing';
 const DEFAULT_EMAIL_WORKER_CONCURRENCY = 2;
+// TASK-068B — upper clamp on email-worker concurrency. The baseline (TASK-054)
+// is 2; scaling toward ~100 mailboxes may raise it, but an unbounded value would
+// let one process open too many parallel Graph/Telegram calls and trip provider
+// rate limits. Anything above this cap is clamped down (safe default preserved).
+export const MAX_EMAIL_WORKER_CONCURRENCY = 20;
 
 export function loadQueueEnv(values: EnvValues = loadEnv().values): {
   redisUrl: string;
@@ -193,10 +200,37 @@ export function loadQueueEnv(values: EnvValues = loadEnv().values): {
   if (rawConcurrency !== undefined) {
     const parsed = Number.parseInt(rawConcurrency, 10);
     if (Number.isFinite(parsed) && parsed > 0) {
-      emailWorkerConcurrency = parsed;
+      // Clamp to the safe upper bound — never below 1, never above the cap.
+      emailWorkerConcurrency = Math.min(parsed, MAX_EMAIL_WORKER_CONCURRENCY);
     }
   }
   return { redisUrl, emailQueueName, emailWorkerConcurrency };
+}
+
+// TASK-068B — queue-level rate limiter for the email worker. Conservative
+// defaults: at most 20 jobs may START per 1s window. This is a ceiling that
+// smooths bursts (webhook + delta polling overlapping at ~100 mailboxes) so the
+// worker never stampedes Microsoft Graph / Telegram; it does NOT fail or retry
+// jobs — BullMQ simply delays the next job until the window frees up.
+const DEFAULT_EMAIL_WORKER_RATE_MAX = 20;
+const DEFAULT_EMAIL_WORKER_RATE_DURATION_MS = 1_000;
+const MIN_EMAIL_WORKER_RATE_MAX = 1;
+const MIN_EMAIL_WORKER_RATE_DURATION_MS = 100;
+
+export function loadEmailWorkerRateLimitEnv(
+  values: EnvValues = loadEnv().values,
+): { max: number; durationMs: number } {
+  const max = parsePositiveIntEnv(
+    values.EMAIL_WORKER_RATE_MAX,
+    DEFAULT_EMAIL_WORKER_RATE_MAX,
+    MIN_EMAIL_WORKER_RATE_MAX,
+  );
+  const durationMs = parsePositiveIntEnv(
+    values.EMAIL_WORKER_RATE_DURATION_MS,
+    DEFAULT_EMAIL_WORKER_RATE_DURATION_MS,
+    MIN_EMAIL_WORKER_RATE_DURATION_MS,
+  );
+  return { max, durationMs };
 }
 
 // TASK-031 — delta polling backup worker config. Defaults mirror the spec:
