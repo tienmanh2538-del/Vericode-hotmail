@@ -14,6 +14,7 @@ import { createLogger } from '@/lib/logger';
 import {
   deriveMailboxReadiness,
   mailboxHasCustomer,
+  mailboxNeedsReconnect,
 } from '@/lib/mailboxes/mailbox-list-filter';
 import { listCustomers } from '@/services/customers/customer.service';
 import { assignMailboxCustomerAction } from '@/services/microsoft/mailbox-assign-actions';
@@ -154,6 +155,13 @@ export default async function MailboxDetailPage({
     mailbox.id,
   );
   const isDisconnected = mailbox.status === 'DISABLED';
+  // TASK-069B — RECONNECT_REQUIRED (revoked/expired token) or DISABLED both mean
+  // the Microsoft auth/token is no longer usable to relay codes; the remedy in
+  // both cases is to re-run the OAuth connect flow. Distinguishing this from the
+  // mailbox record simply "existing" stops the checklist from showing a green
+  // "connected" tick while a mailbox actually needs reconnecting.
+  const needsReconnect = mailboxNeedsReconnect(mailbox.status);
+  const isTokenIssue = mailbox.status === 'RECONNECT_REQUIRED';
 
   const customerLabel =
     mailbox.customerName ?? mailbox.ownerCustomerName ?? '—';
@@ -240,23 +248,36 @@ export default async function MailboxDetailPage({
             <strong>Mailbox chưa sẵn sàng relay code.</strong>{' '}
             {isDisconnected
               ? 'Mailbox đã bị ngắt kết nối nên không poll, không renew subscription và không relay code. Hãy reconnect Hotmail/Outlook để dùng lại — gán Telegram mapping KHÔNG bật lại mailbox.'
-              : !hasCustomer
-                ? 'Hãy gắn mailbox này vào đúng customer trước.'
-                : !activeMapping
-                  ? 'Mailbox chưa có active Telegram destination. Cần tạo mapping trước khi coi là Ready.'
-                  : 'Mailbox đang ở trạng thái lỗi vận hành (token/subscription/webhook). Kiểm tra chi tiết bên dưới.'}
+              : isTokenIssue
+                ? 'Kết nối Microsoft đã hết hiệu lực (token cần cấp lại / cần đăng nhập lại) nên mailbox không đọc được email và không relay code. Hãy reconnect Hotmail/Outlook để cấp lại quyền. Customer và Telegram mapping hiện tại sẽ được giữ nguyên.'
+                : !hasCustomer
+                  ? 'Hãy gắn mailbox này vào đúng customer trước.'
+                  : !activeMapping
+                    ? 'Mailbox chưa có active Telegram destination. Cần tạo mapping trước khi coi là Ready.'
+                    : 'Mailbox đang ở trạng thái lỗi vận hành (subscription/webhook). Kiểm tra chi tiết bên dưới.'}
           </div>
         ) : null}
 
+        {/* TASK-069B — split "is the mailbox connected?" into two distinct
+            signals so a green tick can never imply auth is healthy when it is
+            not: (1) the mailbox record/provider exists, and (2) the Microsoft
+            auth/token is actually usable. Customer + Telegram destination follow. */}
         <ul className="mailbox-detail__checklist">
           <li>
-            <span aria-hidden="true">{isDisconnected ? '✗' : '✓'}</span>{' '}
-            {isDisconnected ? (
+            <span aria-hidden="true">✓</span> Mailbox record &amp; provider:{' '}
+            <strong>{mailbox.provider}</strong>
+          </li>
+          <li>
+            <span aria-hidden="true">{needsReconnect ? '✗' : '✓'}</span>{' '}
+            {needsReconnect ? (
               <>
-                Mailbox đã ngắt kết nối — cần reconnect ({mailbox.provider})
+                Microsoft auth/token:{' '}
+                {isDisconnected
+                  ? 'đã ngắt kết nối — cần reconnect'
+                  : 'token hết hiệu lực — cần reconnect'}
               </>
             ) : (
-              <>Mailbox đã connect ({mailbox.provider})</>
+              <>Microsoft auth/token đang khỏe</>
             )}
           </li>
           <li>
@@ -274,14 +295,41 @@ export default async function MailboxDetailPage({
           </li>
         </ul>
 
-        {readiness !== 'READY' && canManageMappings ? (
+        {/* TASK-069B — Reconnect CTA whenever the Microsoft auth/token needs
+            re-authorising (DISABLED or RECONNECT_REQUIRED). It reuses the
+            existing OAuth connect flow but pins the target mailbox id so a wrong
+            account can't overwrite this mailbox. Gated by MANAGE_MAILBOXES; the
+            backend save stays guarded regardless of this UI hiding. */}
+        {needsReconnect && canManageMailbox ? (
+          <div className="mailbox-detail__reconnect">
+            <p className="mailbox-detail__muted">
+              {isDisconnected
+                ? 'Reconnect qua Microsoft OAuth để bật lại mailbox. Telegram mapping sẽ không tự bật lại mailbox.'
+                : 'Reconnect qua Microsoft OAuth để cấp lại quyền đọc mail. Customer và Telegram mapping hiện tại được giữ nguyên.'}
+            </p>
+            <ConnectMailboxButton
+              variant="compact"
+              showIntro={false}
+              buttonLabel="Reconnect Hotmail / Outlook"
+              reconnectMailboxId={mailbox.id}
+            />
+          </div>
+        ) : null}
+        {needsReconnect && !canManageMailbox ? (
+          <p className="mailbox-detail__muted">
+            Mailbox cần reconnect Microsoft. Bạn chỉ có quyền xem — hãy báo
+            OWNER/ADMIN để reconnect mailbox này.
+          </p>
+        ) : null}
+
+        {readiness !== 'READY' && !needsReconnect && canManageMappings ? (
           <p className="mailbox-detail__cta">
             <Link href="/admin/telegram" className="customers-table__action">
               Mở Telegram mappings để hoàn tất thiết lập →
             </Link>
           </p>
         ) : null}
-        {readiness !== 'READY' && !canManageMappings ? (
+        {readiness !== 'READY' && !needsReconnect && !canManageMappings ? (
           <p className="mailbox-detail__muted">
             Bạn chỉ có quyền xem. Liên hệ OWNER/ADMIN để hoàn tất thiết lập mapping.
           </p>
@@ -314,17 +362,10 @@ export default async function MailboxDetailPage({
             alreadyDisconnected={isDisconnected}
           />
           {isDisconnected ? (
-            <div className="mailbox-detail__reconnect">
-              <p className="mailbox-detail__muted">
-                Muốn dùng lại mailbox này? Reconnect qua Microsoft OAuth để bật
-                lại. Telegram mapping sẽ không tự bật lại mailbox.
-              </p>
-              <ConnectMailboxButton
-                variant="compact"
-                showIntro={false}
-                buttonLabel="Reconnect Hotmail / Outlook"
-              />
-            </div>
+            <p className="mailbox-detail__muted">
+              Mailbox đang ngắt kết nối. Dùng nút “Reconnect Hotmail / Outlook” ở
+              mục Onboarding readiness phía trên để bật lại.
+            </p>
           ) : null}
         </section>
       ) : null}

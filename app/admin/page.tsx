@@ -32,7 +32,8 @@ type OAuthReason =
   | "invalid_state"
   | "missing_code"
   | "token_exchange_failed"
-  | "mailbox_save_failed";
+  | "mailbox_save_failed"
+  | "mailbox_mismatch";
 
 const OAUTH_REASON_MESSAGES: Record<OAuthReason, string> = {
   access_denied: "Bạn đã từ chối cấp quyền cho Microsoft.",
@@ -45,6 +46,10 @@ const OAUTH_REASON_MESSAGES: Record<OAuthReason, string> = {
     "Không lấy được token từ Microsoft. Kiểm tra cấu hình App Registration.",
   mailbox_save_failed:
     "Đã lấy được token nhưng không lưu được mailbox vào database.",
+  // TASK-069B — reconnect targeted a specific mailbox but a different Microsoft
+  // account signed in; the mailbox was left untouched on purpose.
+  mailbox_mismatch:
+    "Tài khoản Microsoft vừa đăng nhập không khớp mailbox đang reconnect. Mailbox được giữ nguyên — hãy reconnect lại bằng đúng tài khoản Hotmail/Outlook của mailbox đó.",
 };
 
 function parseStatus(value: string | string[] | undefined): OAuthStatus | null {

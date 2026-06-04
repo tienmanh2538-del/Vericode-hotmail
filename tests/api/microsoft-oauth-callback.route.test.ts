@@ -11,6 +11,8 @@ const mailboxStore: Array<{
   status: string;
   tokenLastRefreshedAt: Date | null;
   createdById: string | null;
+  // TASK-069B — present so reconnect tests can assert it survives.
+  customerId?: string | null;
 }> = [];
 let mailboxIdCounter = 0;
 
@@ -68,9 +70,8 @@ vi.mock('@/lib/prisma', () => ({
 
 // Import route AFTER vi.mock so the mocked prisma is wired in.
 const { GET } = await import('@/app/api/microsoft/oauth/callback/route');
-const { MICROSOFT_OAUTH_STATE_COOKIE } = await import(
-  '@/services/microsoft/oauth-connect-url.service'
-);
+const { MICROSOFT_OAUTH_STATE_COOKIE, MICROSOFT_OAUTH_RECONNECT_COOKIE } =
+  await import('@/services/microsoft/oauth-connect-url.service');
 
 const CLIENT_ID = 'fake-client-id-1234';
 const CLIENT_SECRET = 'fake-client-secret-do-not-leak';
@@ -102,12 +103,21 @@ function stubMicrosoftEnv() {
   vi.stubEnv('ENCRYPTION_KEY', generateEncryptionKey());
 }
 
-function makeRequest(qs: string, cookieValue?: string): NextRequest {
+function makeRequest(
+  qs: string,
+  cookieValue?: string,
+  reconnectMailboxId?: string,
+): NextRequest {
   const url = `${CALLBACK_BASE}?${qs}`;
-  const headers: Record<string, string> = {};
+  const cookies: string[] = [];
   if (cookieValue !== undefined) {
-    headers['cookie'] = `${MICROSOFT_OAUTH_STATE_COOKIE}=${cookieValue}`;
+    cookies.push(`${MICROSOFT_OAUTH_STATE_COOKIE}=${cookieValue}`);
   }
+  if (reconnectMailboxId !== undefined) {
+    cookies.push(`${MICROSOFT_OAUTH_RECONNECT_COOKIE}=${reconnectMailboxId}`);
+  }
+  const headers: Record<string, string> = {};
+  if (cookies.length > 0) headers['cookie'] = cookies.join('; ');
   return new NextRequest(url, { headers });
 }
 
@@ -435,6 +445,76 @@ describe('GET callback — mailbox save behavior', () => {
     expect(fullSerialized).not.toContain(FAKE_ACCESS_TOKEN);
     expect(fullSerialized).not.toContain(FAKE_REFRESH_TOKEN);
     expect(fullSerialized).not.toContain(FAKE_ID_TOKEN);
+  });
+});
+
+describe('GET callback — reconnect target (TASK-069B)', () => {
+  it('reconnects the targeted mailbox and preserves its customer assignment', async () => {
+    stubFetchTokenSuccess();
+    // Seed the broken mailbox the operator is reconnecting. Same identity as the
+    // Graph profile the stub returns, so the account legitimately matches.
+    mailboxStore.push({
+      id: 'mb_target',
+      emailAddress: FAKE_MAILBOX_EMAIL,
+      provider: 'MICROSOFT',
+      microsoftUserId: FAKE_MS_USER_ID,
+      encryptedRefreshToken: 'stale-encrypted',
+      status: 'RECONNECT_REQUIRED',
+      tokenLastRefreshedAt: null,
+      createdById: null,
+      customerId: 'cust_keep_me',
+    });
+
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+      'mb_target',
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('oauth')).toBe('success');
+
+    expect(mailboxStore).toHaveLength(1);
+    expect(mailboxStore[0].id).toBe('mb_target');
+    expect(mailboxStore[0].status).toBe('ACTIVE');
+    // Reconnect must not wipe the customer assignment or duplicate the mailbox.
+    expect(mailboxStore[0].customerId).toBe('cust_keep_me');
+    expect(mailboxStore[0].encryptedRefreshToken).not.toBe('stale-encrypted');
+  });
+
+  it('refuses with reason=mailbox_mismatch when a different account signs in, leaving the mailbox untouched', async () => {
+    stubFetchTokenSuccess(); // Graph returns FAKE_MS_USER_ID / FAKE_MAILBOX_EMAIL
+    // The mailbox being reconnected belongs to a DIFFERENT Microsoft account.
+    mailboxStore.push({
+      id: 'mb_other',
+      emailAddress: 'different-owner@example.com',
+      provider: 'MICROSOFT',
+      microsoftUserId: 'ms-user-different',
+      encryptedRefreshToken: 'original-encrypted',
+      status: 'RECONNECT_REQUIRED',
+      tokenLastRefreshedAt: null,
+      createdById: null,
+      customerId: 'cust_other',
+    });
+
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+      'mb_other',
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.pathname).toBe('/admin');
+    expect(loc.searchParams.get('oauth')).toBe('error');
+    expect(loc.searchParams.get('reason')).toBe('mailbox_mismatch');
+
+    // The targeted mailbox is untouched and no stray mailbox was created.
+    expect(mailboxStore).toHaveLength(1);
+    expect(mailboxStore[0].id).toBe('mb_other');
+    expect(mailboxStore[0].status).toBe('RECONNECT_REQUIRED');
+    expect(mailboxStore[0].encryptedRefreshToken).toBe('original-encrypted');
   });
 });
 

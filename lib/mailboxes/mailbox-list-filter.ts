@@ -92,6 +92,18 @@ function hasActiveMapping(input: MailboxReadinessInput): boolean {
 }
 
 /**
+ * TASK-069B — true when the stored Microsoft refresh token can no longer relay
+ * codes and the operator must re-run the OAuth connect flow: either a deliberate
+ * disconnect (DISABLED, TASK-052) or a revoked/expired grant (RECONNECT_REQUIRED,
+ * set by the workers when a token refresh hits invalid_grant/interaction_required).
+ * The mailbox detail page uses this to (a) show "Microsoft auth/token" as NOT
+ * healthy instead of a green "connected" tick, and (b) surface a Reconnect CTA.
+ */
+export function mailboxNeedsReconnect(status: MailboxStatusValue): boolean {
+  return status === 'DISABLED' || status === 'RECONNECT_REQUIRED';
+}
+
+/**
  * Derive a single readiness signal. Problem states (token/subscription/webhook/
  * error/disabled) take precedence so a broken mailbox is never mislabelled
  * "Ready". TASK-047: a mailbox is only READY when it is ACTIVE, attached to a

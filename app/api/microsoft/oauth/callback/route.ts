@@ -2,7 +2,10 @@ import { timingSafeEqual } from 'node:crypto';
 import { NextResponse, type NextRequest } from 'next/server';
 import { loadEnv, type EnvValues } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
-import { MICROSOFT_OAUTH_STATE_COOKIE } from '@/services/microsoft/oauth-connect-url.service';
+import {
+  MICROSOFT_OAUTH_RECONNECT_COOKIE,
+  MICROSOFT_OAUTH_STATE_COOKIE,
+} from '@/services/microsoft/oauth-connect-url.service';
 import {
   MicrosoftOAuthTokenExchangeError,
   exchangeAuthorizationCodeForTokens,
@@ -24,7 +27,8 @@ type CallbackReason =
   | 'invalid_state'
   | 'missing_code'
   | 'token_exchange_failed'
-  | 'mailbox_save_failed';
+  | 'mailbox_save_failed'
+  | 'mailbox_mismatch';
 
 const MICROSOFT_ERROR_REASON_MAP: Record<string, CallbackReason> = {
   access_denied: 'access_denied',
@@ -45,6 +49,17 @@ function safeStateEquals(a: string, b: string): boolean {
 function clearStateCookie(response: NextResponse, env: EnvValues): void {
   response.cookies.set({
     name: MICROSOFT_OAUTH_STATE_COOKIE,
+    value: '',
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: env.APP_ENV === 'production',
+    path: '/',
+    maxAge: 0,
+  });
+  // TASK-069B — always clear the reconnect-target cookie too, on success or
+  // error, so it can never leak into an unrelated later OAuth attempt.
+  response.cookies.set({
+    name: MICROSOFT_OAUTH_RECONNECT_COOKIE,
     value: '',
     httpOnly: true,
     sameSite: 'lax',
@@ -86,6 +101,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const errorParam = url.searchParams.get('error');
 
   const cookieState = request.cookies.get(MICROSOFT_OAUTH_STATE_COOKIE)?.value;
+  // TASK-069B — present only when this flow began from a mailbox "Reconnect"
+  // button. Empty/blank means a fresh connect (no reconnect target).
+  const reconnectCookie = request.cookies
+    .get(MICROSOFT_OAUTH_RECONNECT_COOKIE)
+    ?.value?.trim();
+  const expectedMailboxId =
+    typeof reconnectCookie === 'string' && reconnectCookie.length > 0
+      ? reconnectCookie
+      : null;
 
   if (typeof errorParam === 'string' && errorParam.length > 0) {
     const reason = mapMicrosoftError(errorParam);
@@ -149,10 +173,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       displayName: profile.displayName,
       refreshToken: tokens.refreshToken,
       scope: tokens.scope ?? null,
+      expectedMailboxId,
     });
   } catch (err: unknown) {
     if (err instanceof MailboxConnectError) {
       logger.warn('Mailbox connect failed after OAuth callback', { kind: err.kind });
+      // TASK-069B — a reconnect that targeted a specific mailbox but landed a
+      // different Microsoft account is refused safely; tell the operator the
+      // accounts did not match rather than a generic save failure.
+      if (err.kind === 'mismatch') {
+        return buildRedirect(env, 'error', 'mailbox_mismatch');
+      }
     } else {
       logger.error('Microsoft OAuth mailbox save unexpected error');
     }

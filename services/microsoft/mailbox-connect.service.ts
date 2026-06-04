@@ -6,7 +6,11 @@ import { createAuditLogInDb as defaultCreateAuditLog } from '@/services/logs/pri
 
 const logger = createLogger();
 
-export type MailboxConnectErrorKind = 'validation' | 'encryption' | 'database';
+export type MailboxConnectErrorKind =
+  | 'validation'
+  | 'encryption'
+  | 'database'
+  | 'mismatch';
 
 export class MailboxConnectError extends Error {
   readonly kind: MailboxConnectErrorKind;
@@ -25,6 +29,12 @@ export interface SaveConnectedMailboxInput {
   accessTokenExpiresAt?: Date | null;
   scope?: string | null;
   connectedByUserId?: string | null;
+  // TASK-069B — when the OAuth flow was started from a specific mailbox's
+  // "Reconnect" button, this is that mailbox's id. The save then refuses to run
+  // unless the connected Microsoft account resolves to exactly that row, so a
+  // mistaken sign-in with a different account can never overwrite or duplicate
+  // the wrong mailbox. Absent for the fresh "Connect" flow.
+  expectedMailboxId?: string | null;
 }
 
 export interface SaveConnectedMailboxResult {
@@ -86,6 +96,7 @@ export async function saveConnectedMailbox(
 ): Promise<SaveConnectedMailboxResult> {
   const microsoftUserId = requireNonEmpty(input.microsoftUserId, 'microsoftUserId');
   const emailAddress = requireNonEmpty(input.emailAddress, 'emailAddress').toLowerCase();
+  const expectedMailboxId = trimOrNull(input.expectedMailboxId ?? null);
 
   // Refresh token is required to keep the mailbox ACTIVE — without it we could
   // never refresh the access token, so creating an ACTIVE mailbox would be a
@@ -129,6 +140,19 @@ export async function saveConnectedMailbox(
     const existing =
       byMsUser ?? (await prisma.mailbox.findUnique({ where: { emailAddress } }));
 
+    // TASK-069B — reconnect safety. When the flow targets a specific mailbox,
+    // the connected account MUST resolve to that exact row. If it resolves to a
+    // different mailbox (or to none — which would otherwise create a brand-new
+    // mailbox), the operator signed in with the wrong Microsoft account: fail
+    // safe BEFORE any write so the targeted mailbox is never overwritten and no
+    // stray mailbox is created. customerId / Telegram mappings are untouched.
+    if (expectedMailboxId !== null && existing?.id !== expectedMailboxId) {
+      throw new MailboxConnectError(
+        'mismatch',
+        'connected Microsoft account does not match the mailbox being reconnected',
+      );
+    }
+
     if (existing) {
       saved = await prisma.mailbox.update({
         where: { id: existing.id },
@@ -156,7 +180,10 @@ export async function saveConnectedMailbox(
       });
       created = true;
     }
-  } catch {
+  } catch (error) {
+    // A reconnect mismatch is an expected, safe refusal — propagate it as-is so
+    // the caller can show the right message instead of a generic DB failure.
+    if (error instanceof MailboxConnectError) throw error;
     logger.error('Mailbox upsert failed', { microsoftUserId });
     throw new MailboxConnectError('database', 'failed to persist mailbox');
   }

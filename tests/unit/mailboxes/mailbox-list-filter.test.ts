@@ -7,8 +7,10 @@ import {
   filterMailboxes,
   mailboxCustomerLabel,
   mailboxHasCustomer,
+  mailboxNeedsReconnect,
   type MailboxListFilters,
 } from '@/lib/mailboxes/mailbox-list-filter';
+import type { MailboxStatusValue } from '@/services/microsoft/mailbox-list.service';
 import type { MailboxListItem } from '@/services/microsoft/mailbox-list.service';
 
 // Synthetic fixtures only — no secrets, no real chat IDs, no real email bodies.
@@ -54,6 +56,22 @@ describe('deriveMailboxReadiness', () => {
     ).toBe('TOKEN_ISSUE');
   });
 
+  // TASK-069B — a RECONNECT_REQUIRED mailbox must never read as Ready even when
+  // it has a customer AND an active mapping, so the detail page won't show a
+  // green "connected" tick. This is the exact state the bug report hit.
+  it('is never READY for RECONNECT_REQUIRED even with customer + active mapping', () => {
+    expect(
+      deriveMailboxReadiness(
+        makeMailbox({
+          status: 'RECONNECT_REQUIRED',
+          customerName: 'Acme',
+          telegramMappingStatus: 'ACTIVE',
+          subscriptionStatus: 'ACTIVE',
+        }),
+      ),
+    ).toBe('TOKEN_ISSUE');
+  });
+
   it('surfaces SUBSCRIPTION_ISSUE for an expired mailbox status', () => {
     expect(
       deriveMailboxReadiness(makeMailbox({ status: 'SUBSCRIPTION_EXPIRED' })),
@@ -92,6 +110,27 @@ describe('deriveMailboxReadiness', () => {
         }),
       ),
     ).toBe('DISABLED');
+  });
+});
+
+// TASK-069B — the detail page drives both the "Microsoft auth/token" checklist
+// tick and the Reconnect CTA off this single predicate.
+describe('mailboxNeedsReconnect', () => {
+  it('is true for the two states whose remedy is re-running OAuth connect', () => {
+    expect(mailboxNeedsReconnect('DISABLED')).toBe(true);
+    expect(mailboxNeedsReconnect('RECONNECT_REQUIRED')).toBe(true);
+  });
+
+  it('is false for healthy/operational states (token itself still usable)', () => {
+    const others: MailboxStatusValue[] = [
+      'ACTIVE',
+      'SUBSCRIPTION_EXPIRED',
+      'WEBHOOK_FAILED',
+      'ERROR',
+    ];
+    for (const status of others) {
+      expect(mailboxNeedsReconnect(status)).toBe(false);
+    }
   });
 });
 

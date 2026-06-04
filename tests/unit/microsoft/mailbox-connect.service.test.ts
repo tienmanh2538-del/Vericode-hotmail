@@ -23,6 +23,8 @@ interface StoredMailbox {
   status: string;
   tokenLastRefreshedAt: Date | null;
   createdById: string | null;
+  // TASK-069B — modelled so tests can assert reconnect never clears it.
+  customerId: string | null;
 }
 
 function createFakePrisma(): {
@@ -63,6 +65,7 @@ function createFakePrisma(): {
           status: data.status as string,
           tokenLastRefreshedAt: (data.tokenLastRefreshedAt as Date) ?? null,
           createdById: (data.createdById as string | null) ?? null,
+          customerId: (data.customerId as string | null) ?? null,
         };
         store.push(record);
         return { ...record };
@@ -361,6 +364,122 @@ describe('saveConnectedMailbox — Case 5: no token leakage', () => {
 
     consoleErrorSpy.mockRestore();
     consoleWarnSpy.mockRestore();
+  });
+});
+
+describe('saveConnectedMailbox — Case 6: reconnect with expectedMailboxId (TASK-069B)', () => {
+  it('updates the targeted mailbox and preserves its customer assignment', async () => {
+    const { prisma, store } = createFakePrisma();
+    const { audit } = makeAuditCollector();
+
+    // Seed a previously-connected mailbox that is now token-broken and assigned
+    // to a customer (the reconnect must not wipe that assignment).
+    await saveConnectedMailbox(
+      {
+        microsoftUserId: 'ms-user-rc-1',
+        emailAddress: 'reconnect@example.com',
+        refreshToken: FAKE_REFRESH_TOKEN,
+      },
+      { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+    );
+    store[0].status = 'RECONNECT_REQUIRED';
+    store[0].customerId = 'cust_keep_me';
+    const targetId = store[0].id;
+
+    const result = await saveConnectedMailbox(
+      {
+        microsoftUserId: 'ms-user-rc-1',
+        emailAddress: 'reconnect@example.com',
+        refreshToken: ANOTHER_REFRESH_TOKEN,
+        expectedMailboxId: targetId,
+      },
+      { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+    );
+
+    expect(result.created).toBe(false);
+    expect(result.mailboxId).toBe(targetId);
+    expect(store).toHaveLength(1);
+    expect(store[0].status).toBe('ACTIVE');
+    // Customer assignment survived the reconnect (never part of the update data).
+    expect(store[0].customerId).toBe('cust_keep_me');
+  });
+
+  it('refuses (mismatch) and writes nothing when the account resolves to no existing mailbox', async () => {
+    const { prisma, store } = createFakePrisma();
+    const { audit, calls } = makeAuditCollector();
+
+    await saveConnectedMailbox(
+      {
+        microsoftUserId: 'ms-user-rc-2',
+        emailAddress: 'target@example.com',
+        refreshToken: FAKE_REFRESH_TOKEN,
+      },
+      { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+    );
+    const targetId = store[0].id;
+    const originalToken = store[0].encryptedRefreshToken;
+    const auditCountBefore = calls.length;
+
+    // Operator clicked Reconnect on `targetId` but signed in with a DIFFERENT
+    // Microsoft account (no row matches) — must fail safe, not create a new row.
+    await expect(
+      saveConnectedMailbox(
+        {
+          microsoftUserId: 'ms-user-wrong',
+          emailAddress: 'wrong-account@example.com',
+          refreshToken: ANOTHER_REFRESH_TOKEN,
+          expectedMailboxId: targetId,
+        },
+        { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+      ),
+    ).rejects.toMatchObject({ kind: 'mismatch' });
+
+    expect(store).toHaveLength(1);
+    expect(store[0].status).toBe('ACTIVE');
+    expect(store[0].encryptedRefreshToken).toBe(originalToken);
+    expect(calls).toHaveLength(auditCountBefore);
+  });
+
+  it('refuses (mismatch) when the account resolves to a different existing mailbox', async () => {
+    const { prisma, store } = createFakePrisma();
+    const { audit } = makeAuditCollector();
+
+    await saveConnectedMailbox(
+      {
+        microsoftUserId: 'ms-user-A',
+        emailAddress: 'a@example.com',
+        refreshToken: FAKE_REFRESH_TOKEN,
+      },
+      { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+    );
+    const targetId = store[0].id; // mailbox A — the one we intend to reconnect
+
+    await saveConnectedMailbox(
+      {
+        microsoftUserId: 'ms-user-B',
+        emailAddress: 'b@example.com',
+        refreshToken: FAKE_REFRESH_TOKEN,
+      },
+      { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+    );
+    const mailboxB = { ...store[1] };
+
+    // Signed in as account B while reconnecting A → resolves to B, not A.
+    await expect(
+      saveConnectedMailbox(
+        {
+          microsoftUserId: 'ms-user-B',
+          emailAddress: 'b@example.com',
+          refreshToken: ANOTHER_REFRESH_TOKEN,
+          expectedMailboxId: targetId,
+        },
+        { prisma, encryptSecret: fakeEncrypt, createAuditLog: audit },
+      ),
+    ).rejects.toMatchObject({ kind: 'mismatch' });
+
+    expect(store).toHaveLength(2);
+    // Neither mailbox A nor mailbox B was mutated.
+    expect(store[1].encryptedRefreshToken).toBe(mailboxB.encryptedRefreshToken);
   });
 });
 

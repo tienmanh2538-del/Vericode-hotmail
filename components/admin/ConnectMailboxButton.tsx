@@ -14,6 +14,10 @@ export interface ConnectMailboxButtonProps {
   variant?: ConnectMailboxButtonVariant;
   showIntro?: boolean;
   buttonLabel?: string;
+  // TASK-069B — when reconnecting a specific mailbox, pass its id so the OAuth
+  // callback can refuse to overwrite a different mailbox if the wrong Microsoft
+  // account signs in. Omitted for the fresh "Connect" flow.
+  reconnectMailboxId?: string;
 }
 
 const DEFAULT_BUTTON_LABEL = "Connect Hotmail / Outlook";
@@ -27,6 +31,7 @@ export function ConnectMailboxButton({
   variant = "default",
   showIntro = true,
   buttonLabel = DEFAULT_BUTTON_LABEL,
+  reconnectMailboxId,
 }: ConnectMailboxButtonProps = {}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +42,13 @@ export function ConnectMailboxButton({
     setError(null);
 
     try {
-      const response = await fetch("/api/mailboxes/connect-url", {
+      const connectUrl =
+        typeof reconnectMailboxId === "string" && reconnectMailboxId.length > 0
+          ? `/api/mailboxes/connect-url?mailboxId=${encodeURIComponent(
+              reconnectMailboxId,
+            )}`
+          : "/api/mailboxes/connect-url";
+      const response = await fetch(connectUrl, {
         method: "GET",
         credentials: "same-origin",
         cache: "no-store",

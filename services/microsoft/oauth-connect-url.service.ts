@@ -10,6 +10,11 @@ export const MICROSOFT_OAUTH_SCOPES = [
 export const MICROSOFT_OAUTH_STATE_BYTES = 32;
 export const MICROSOFT_OAUTH_STATE_COOKIE = 'ms_oauth_state';
 export const MICROSOFT_OAUTH_STATE_TTL_SECONDS = 600;
+// TASK-069B — short-lived, httpOnly cookie carrying the id of the mailbox the
+// operator clicked "Reconnect" on. It is NOT a secret (just a row id) but is
+// kept httpOnly + same TTL as the state cookie. The callback uses it to refuse
+// overwriting a different mailbox when the OAuth account doesn't match.
+export const MICROSOFT_OAUTH_RECONNECT_COOKIE = 'ms_oauth_reconnect';
 
 export type MicrosoftOAuthErrorKind = 'config';
 
