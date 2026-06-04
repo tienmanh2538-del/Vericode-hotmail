@@ -7,11 +7,9 @@ import { prisma as defaultPrisma } from '@/lib/prisma';
 import { decryptSecret } from '@/lib/security/encryption';
 import { createLogger, type Logger } from '@/lib/logger';
 import { loadSubscriptionRenewalEnv } from '@/lib/env';
-import {
-  RefreshAccessTokenError,
-  refreshMicrosoftAccessToken,
-} from '@/services/microsoft/refresh-access-token.service';
+import { refreshMicrosoftAccessToken } from '@/services/microsoft/refresh-access-token.service';
 import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
+import { classifyRefreshTokenError } from '@/services/microsoft/refresh-token-failure';
 import { renewGraphSubscription } from '@/services/microsoft/graph-subscription.service';
 import { createAuditLogInDb } from '@/services/logs/prisma-audit-log-store';
 import {
@@ -34,10 +32,8 @@ const SUBSCRIPTION_STATUS_FAILED = 'FAILED';
 const SUBSCRIPTION_STATUS_EXPIRED = 'EXPIRED';
 const MAILBOX_STATUS_DISABLED = 'DISABLED';
 
-// Microsoft returns invalid_grant when the refresh token has been revoked or
-// expired — the only fix is a human re-consent, so we surface it as
-// reconnect-required rather than retrying.
-const REVOKED_GRANT_ERROR_CODES = new Set(['invalid_grant', 'interaction_required']);
+// TASK-069C — the revoke-vs-transient decision now lives in the shared
+// `classifyRefreshTokenError` helper so all three workers stay in lockstep.
 
 // ---------------------------------------------------------------------------
 // Prisma-backed repo
@@ -182,34 +178,12 @@ export function createPrismaRenewalAccessTokenPort(
         });
         return exchanged.accessToken;
       } catch (error) {
-        if (error instanceof RefreshAccessTokenError) {
-          if (
-            error.kind === 'token_endpoint' &&
-            error.microsoftErrorCode !== undefined &&
-            REVOKED_GRANT_ERROR_CODES.has(error.microsoftErrorCode)
-          ) {
-            throw new SubscriptionRenewalTokenError(
-              'reconnect_required',
-              'refresh token revoked',
-            );
-          }
-          if (error.kind === 'config') {
-            throw new SubscriptionRenewalTokenError(
-              'config',
-              'Microsoft OAuth is not configured',
-            );
-          }
-          if (error.kind === 'network') {
-            throw new SubscriptionRenewalTokenError(
-              'transient',
-              'token endpoint network error',
-            );
-          }
-        }
-        // Unknown token_endpoint failures: treat as transient so the next tick
-        // retries instead of permanently disabling a possibly-fine mailbox.
+        // TASK-069C — shared classification: revoke (invalid_grant /
+        // interaction_required) → reconnect_required; config → config; everything
+        // else (network/429/5xx/unknown) → transient so the next tick retries
+        // instead of permanently disabling a possibly-fine mailbox.
         throw new SubscriptionRenewalTokenError(
-          'transient',
+          classifyRefreshTokenError(error),
           'failed to exchange refresh token',
         );
       }

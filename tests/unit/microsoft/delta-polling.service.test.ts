@@ -500,7 +500,7 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
   });
 
-  it('marks mailbox RECONNECT_REQUIRED when the access token port throws', async () => {
+  it('marks mailbox RECONNECT_REQUIRED when the token error is reconnect_required', async () => {
     const mailbox: DeltaPollingMailbox = {
       id: 'mb_no_token',
       emailAddress: 'theta@example.com',
@@ -509,7 +509,10 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     const { repo, state } = createFakeRepo([mailbox]);
     const accessToken: DeltaPollingAccessTokenPort = {
       async getAccessTokenForMailbox() {
-        throw new Error('refresh_failed');
+        // TASK-069C — a revoked grant carries classification 'reconnect_required'.
+        throw Object.assign(new Error('grant revoked'), {
+          classification: 'reconnect_required' as const,
+        });
       },
     };
     const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
@@ -523,6 +526,39 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     expect(fetchCalls).toHaveLength(0);
     expect(enqueueCalls).toEqual([]);
     expect(state.reconnectMarked).toEqual(['mb_no_token']);
+    expect(state.savedCursors).toEqual([]);
+    expect(result.failedMailboxCount).toBe(1);
+  });
+
+  it('TASK-069C — does NOT mark RECONNECT_REQUIRED on a transient token error', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_transient',
+      emailAddress: 'kappa@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken: DeltaPollingAccessTokenPort = {
+      async getAccessTokenForMailbox() {
+        // network/429/5xx → transient classification; the next cycle retries.
+        throw Object.assign(new Error('network blip'), {
+          classification: 'transient' as const,
+        });
+      },
+    };
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub, calls: fetchCalls } = fetchStub([]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // Graph never called; the mailbox stays ACTIVE (no reconnect mark), but the
+    // error is recorded and the mailbox is counted as failed this cycle.
+    expect(fetchCalls).toHaveLength(0);
+    expect(enqueueCalls).toEqual([]);
+    expect(state.reconnectMarked).toEqual([]);
+    expect(state.recordedErrors).toHaveLength(1);
+    expect(state.recordedErrors[0].mailboxId).toBe('mb_transient');
     expect(state.savedCursors).toEqual([]);
     expect(result.failedMailboxCount).toBe(1);
   });

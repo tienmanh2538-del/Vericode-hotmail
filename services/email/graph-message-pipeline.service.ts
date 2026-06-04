@@ -25,6 +25,7 @@ import {
   GraphMailError,
   type GraphMailMessage,
 } from '@/services/microsoft/graph-mail.service';
+import { shouldMarkReconnectRequired } from '@/services/microsoft/refresh-token-failure';
 import {
   TelegramSendError,
   type SendTelegramMessageInput,
@@ -72,6 +73,10 @@ export type GraphMessagePipelineStatus =
   | 'FAILED_GRAPH_FETCH'
   | 'FAILED_TELEGRAM_SEND'
   | 'FAILED_RECONNECT_REQUIRED'
+  // TASK-069C — a TRANSIENT token-refresh failure (network/timeout/429/5xx). The
+  // job is retryable but the mailbox is deliberately NOT flagged
+  // RECONNECT_REQUIRED, so a blip never forces a manual reconnect.
+  | 'FAILED_TOKEN_TRANSIENT'
   | 'FAILED_UNEXPECTED';
 
 export type GraphMessageJobSource = 'webhook' | 'manual' | 'test';
@@ -542,7 +547,23 @@ async function processActiveMailboxJob(
   let accessToken: string;
   try {
     accessToken = await deps.accessToken.getAccessTokenForMailbox(mailbox);
-  } catch {
+  } catch (tokenError: unknown) {
+    // TASK-069C — only a genuinely dead grant (invalid_grant /
+    // interaction_required, or a missing/undecryptable token) flips the mailbox
+    // to RECONNECT_REQUIRED. A transient failure (network/timeout/429/5xx) must
+    // NOT change status — the job is retried and the mailbox stays ACTIVE.
+    if (!shouldMarkReconnectRequired(tokenError)) {
+      logger.warn('Mailbox access token refresh failed transiently — will retry', {
+        mailboxId: mailbox.id,
+      });
+      return {
+        ok: false,
+        status: 'FAILED_TOKEN_TRANSIENT',
+        ...baseResultKeys,
+        sentToTelegram: false,
+        reason: 'token_refresh_transient',
+      };
+    }
     logger.warn('Mailbox access token unavailable — flagging reconnect', {
       mailboxId: mailbox.id,
     });

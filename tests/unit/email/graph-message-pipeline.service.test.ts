@@ -104,7 +104,7 @@ function makeHarness(
   options: {
     mailbox?: MailboxLookupRecord | null;
     mailboxLookupThrows?: boolean;
-    accessTokenThrows?: boolean;
+    accessTokenError?: unknown;
     graphMessage?: GraphMailMessage;
     graphError?: Error;
     mapping?:
@@ -132,7 +132,7 @@ function makeHarness(
   } as PipelineHarness['mailboxes'];
 
   const getMock = vi.fn(async () => {
-    if (options.accessTokenThrows) throw new Error('refresh failed');
+    if (options.accessTokenError !== undefined) throw options.accessTokenError;
     return FAKE_ACCESS_TOKEN;
   });
   const accessToken = {
@@ -460,8 +460,11 @@ describe('processGraphMessageJob', () => {
     expect(harness.telegramSender.sendMock).not.toHaveBeenCalled();
   });
 
-  it('returns FAILED_RECONNECT_REQUIRED when the access token cannot be acquired', async () => {
-    const harness = makeHarness({ accessTokenThrows: true });
+  it('TASK-069C — flags reconnect when the token error is reconnect_required', async () => {
+    const tokenError = Object.assign(new Error('grant revoked'), {
+      classification: 'reconnect_required' as const,
+    });
+    const harness = makeHarness({ accessTokenError: tokenError });
 
     const result = await processGraphMessageJob(makeJob(), harness.deps);
 
@@ -472,6 +475,30 @@ describe('processGraphMessageJob', () => {
     );
     expect(harness.graphMail.fetchMock).not.toHaveBeenCalled();
     expect(harness.telegramSender.sendMock).not.toHaveBeenCalled();
+    const auditCalls = harness.audit.auditMock.mock.calls.map(([input]) => input);
+    expect(
+      auditCalls.some((a) => a.action === 'MAILBOX_RECONNECT_REQUIRED'),
+    ).toBe(true);
+  });
+
+  it('TASK-069C — does NOT flag reconnect on a transient token error (retryable)', async () => {
+    const tokenError = Object.assign(new Error('network blip'), {
+      classification: 'transient' as const,
+    });
+    const harness = makeHarness({ accessTokenError: tokenError });
+
+    const result = await processGraphMessageJob(makeJob(), harness.deps);
+
+    expect(result.status).toBe('FAILED_TOKEN_TRANSIENT');
+    expect(result.reason).toBe('token_refresh_transient');
+    // The mailbox must stay ACTIVE — a blip never forces a manual reconnect.
+    expect(harness.mailboxes.markReconnectRequiredMock).not.toHaveBeenCalled();
+    expect(harness.graphMail.fetchMock).not.toHaveBeenCalled();
+    expect(harness.telegramSender.sendMock).not.toHaveBeenCalled();
+    const auditCalls = harness.audit.auditMock.mock.calls.map(([input]) => input);
+    expect(
+      auditCalls.some((a) => a.action === 'MAILBOX_RECONNECT_REQUIRED'),
+    ).toBe(false);
   });
 
   it('never lets the plaintext verification code leak into the result envelope or logs', async () => {

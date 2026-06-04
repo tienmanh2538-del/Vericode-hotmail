@@ -15,6 +15,10 @@ import { decryptSecret } from '@/lib/security/encryption';
 import { createLogger, type Logger } from '@/lib/logger';
 import { refreshMicrosoftAccessToken } from '@/services/microsoft/refresh-access-token.service';
 import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
+import {
+  classifyRefreshTokenError,
+  type RefreshTokenFailureKind,
+} from '@/services/microsoft/refresh-token-failure';
 import { getMessageById } from '@/services/microsoft/graph-mail.service';
 import { findActiveMappingForMailbox } from '@/services/telegram/telegram-mapping.service';
 import { createRetryingTelegramSendPort } from '@/services/telegram/telegram-retry.service';
@@ -146,10 +150,19 @@ interface MailboxRefreshTokenPrismaClient {
 
 export class EmailWorkerTokenError extends Error {
   readonly kind: 'missing_refresh_token' | 'refresh_failed';
-  constructor(kind: 'missing_refresh_token' | 'refresh_failed', message: string) {
+  // TASK-069C — drives whether the pipeline flips the mailbox to
+  // RECONNECT_REQUIRED. `reconnect_required` only for a genuinely dead grant;
+  // `transient` for network/429/5xx so a blip never bricks a healthy mailbox.
+  readonly classification: RefreshTokenFailureKind;
+  constructor(
+    kind: 'missing_refresh_token' | 'refresh_failed',
+    message: string,
+    classification: RefreshTokenFailureKind,
+  ) {
     super(message);
     this.name = 'EmailWorkerTokenError';
     this.kind = kind;
+    this.classification = classification;
   }
 }
 
@@ -163,9 +176,11 @@ export function createPrismaEmailAccessTokenPort(
         select: { encryptedRefreshToken: true },
       });
       if (!row || !row.encryptedRefreshToken) {
+        // No stored credential at all — only a reconnect can fix this.
         throw new EmailWorkerTokenError(
           'missing_refresh_token',
           'mailbox has no encrypted refresh token',
+          'reconnect_required',
         );
       }
       let plaintextRefreshToken: string;
@@ -173,18 +188,23 @@ export function createPrismaEmailAccessTokenPort(
         plaintextRefreshToken = decryptSecret(row.encryptedRefreshToken);
       } catch {
         // Never include the underlying error — it may leak ciphertext/key context.
+        // The stored token is unusable for this mailbox → reconnect required.
         throw new EmailWorkerTokenError(
           'refresh_failed',
           'failed to decrypt refresh token',
+          'reconnect_required',
         );
       }
       let exchanged: { accessToken: string; refreshToken?: string };
       try {
         exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
-      } catch {
+      } catch (error) {
+        // TASK-069C — classify: only a revoked/interaction grant marks reconnect;
+        // network/429/5xx stays transient so the next attempt retries.
         throw new EmailWorkerTokenError(
           'refresh_failed',
           'failed to exchange refresh token',
+          classifyRefreshTokenError(error),
         );
       }
       // Microsoft may rotate the refresh token — persist the new (encrypted)

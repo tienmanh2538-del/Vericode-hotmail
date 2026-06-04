@@ -140,7 +140,8 @@ function computeQueueWaitMs(
  * The processor itself never throws on a domain skip — it returns a status so
  * BullMQ does not retry deterministic skips like NO_TELEGRAM_MAPPING. It does
  * throw for transient failures (FAILED_GRAPH_FETCH, FAILED_RECONNECT_REQUIRED,
- * FAILED_TELEGRAM_SEND) so BullMQ retries based on `attempts/backoff`.
+ * FAILED_TOKEN_TRANSIENT, FAILED_TELEGRAM_SEND) so BullMQ retries based on
+ * `attempts/backoff`.
  *
  * TASK-068C — measures queue-wait + processing-duration and records an
  * aggregate worker-metrics sample (best-effort; never blocks or throws, and
@@ -207,6 +208,8 @@ export async function processEmailWebhookJob(
   if (
     result.status === 'FAILED_GRAPH_FETCH' ||
     result.status === 'FAILED_RECONNECT_REQUIRED' ||
+    // TASK-069C — transient token-refresh failures retry (no reconnect mark).
+    result.status === 'FAILED_TOKEN_TRANSIENT' ||
     result.status === 'FAILED_TELEGRAM_SEND' ||
     result.status === 'FAILED_UNEXPECTED' ||
     result.status === 'DEFERRED_MAILBOX_BUSY'

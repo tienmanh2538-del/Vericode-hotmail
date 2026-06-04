@@ -10,6 +10,10 @@ import { loadDeltaPollingEnv } from '@/lib/env';
 import { refreshMicrosoftAccessToken } from '@/services/microsoft/refresh-access-token.service';
 import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-rotation.service';
 import {
+  classifyRefreshTokenError,
+  type RefreshTokenFailureKind,
+} from '@/services/microsoft/refresh-token-failure';
+import {
   runDeltaPollingOnce,
   type DeltaPollingAccessTokenPort,
   type DeltaPollingDeps,
@@ -109,10 +113,19 @@ interface MailboxRefreshTokenPrismaClient {
 
 export class DeltaPollingTokenError extends Error {
   readonly kind: 'missing_refresh_token' | 'refresh_failed';
-  constructor(kind: 'missing_refresh_token' | 'refresh_failed', message: string) {
+  // TASK-069C — drives whether delta polling flips the mailbox to
+  // RECONNECT_REQUIRED. `transient` (network/429/5xx) keeps the mailbox ACTIVE so
+  // the next cycle retries instead of forcing a manual reconnect.
+  readonly classification: RefreshTokenFailureKind;
+  constructor(
+    kind: 'missing_refresh_token' | 'refresh_failed',
+    message: string,
+    classification: RefreshTokenFailureKind,
+  ) {
     super(message);
     this.name = 'DeltaPollingTokenError';
     this.kind = kind;
+    this.classification = classification;
   }
 }
 
@@ -126,9 +139,11 @@ export function createPrismaAccessTokenPort(
         select: { encryptedRefreshToken: true },
       });
       if (!row || !row.encryptedRefreshToken) {
+        // No stored credential at all — only a reconnect can fix this.
         throw new DeltaPollingTokenError(
           'missing_refresh_token',
           'mailbox has no encrypted refresh token',
+          'reconnect_required',
         );
       }
       let plaintextRefreshToken: string;
@@ -136,19 +151,23 @@ export function createPrismaAccessTokenPort(
         plaintextRefreshToken = decryptSecret(row.encryptedRefreshToken);
       } catch {
         // Never include the underlying error message — it may leak ciphertext
-        // or key context.
+        // or key context. The stored token is unusable → reconnect required.
         throw new DeltaPollingTokenError(
           'refresh_failed',
           'failed to decrypt refresh token',
+          'reconnect_required',
         );
       }
       let exchanged: { accessToken: string; refreshToken?: string };
       try {
         exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
-      } catch {
+      } catch (error) {
+        // TASK-069C — classify: only a revoked/interaction grant marks reconnect;
+        // network/429/5xx stays transient so the next poll cycle retries.
         throw new DeltaPollingTokenError(
           'refresh_failed',
           'failed to exchange refresh token',
+          classifyRefreshTokenError(error),
         );
       }
       // TASK-036 — Microsoft may rotate the refresh token. Persist the new

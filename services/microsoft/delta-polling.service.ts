@@ -20,6 +20,7 @@
 // URLs from those tokens.
 
 import { createLogger, type Logger } from '@/lib/logger';
+import { shouldMarkReconnectRequired } from './refresh-token-failure';
 
 const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 const INBOX_DELTA_PATH = "/me/mailFolders('inbox')/messages/delta";
@@ -371,7 +372,14 @@ export async function runDeltaPollingOnce(
       try {
         accessToken = await deps.accessToken.getAccessTokenForMailbox(mailbox);
       } catch (error) {
-        await safelyMarkReconnectRequired(mailbox.id, deps.repo, logger);
+        // TASK-069C — only a genuinely dead grant (invalid_grant /
+        // interaction_required, or a missing/undecryptable token) flips the
+        // mailbox to RECONNECT_REQUIRED. A transient failure (network/429/5xx)
+        // leaves the mailbox ACTIVE so the next cycle retries; we still record
+        // the error metadata and count it as a failed mailbox this cycle.
+        if (shouldMarkReconnectRequired(error)) {
+          await safelyMarkReconnectRequired(mailbox.id, deps.repo, logger);
+        }
         await safelyRecordError(
           mailbox.id,
           `TOKEN_REFRESH_FAILED:${safeErrorMessage(error)}`,

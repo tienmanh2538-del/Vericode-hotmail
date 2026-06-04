@@ -103,6 +103,8 @@ describe('processEmailWebhookJob — worker → pipeline wiring', () => {
   it.each([
     'FAILED_GRAPH_FETCH',
     'FAILED_RECONNECT_REQUIRED',
+    // TASK-069C — a transient token-refresh failure retries (no reconnect mark).
+    'FAILED_TOKEN_TRANSIENT',
     'FAILED_TELEGRAM_SEND',
     'FAILED_UNEXPECTED',
     // TASK-055 — a deferred (mailbox-busy) job must be retried, not dropped.

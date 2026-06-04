@@ -22,7 +22,9 @@ vi.mock('@/lib/security/encryption', () => ({
   encryptSecret: (...args: unknown[]) => encryptMock(...args),
 }));
 
-const { createPrismaAccessTokenPort } = await import(
+import { RefreshAccessTokenError } from '@/services/microsoft/refresh-access-token.service';
+
+const { createPrismaAccessTokenPort, DeltaPollingTokenError } = await import(
   '@/services/queue/workers/delta-polling-runner'
 );
 
@@ -105,5 +107,81 @@ describe('createPrismaAccessTokenPort — token rotation (TASK-036)', () => {
       }),
     ).rejects.toMatchObject({ name: 'DeltaPollingTokenError' });
     expect(refreshMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('createPrismaAccessTokenPort — failure classification (TASK-069C)', () => {
+  async function classify(rejection: unknown) {
+    decryptMock.mockReturnValue('plain-refresh');
+    refreshMock.mockRejectedValue(rejection);
+    const { client } = mailboxClient('cipher');
+    const port = createPrismaAccessTokenPort(client as never);
+    const error = (await port
+      .getAccessTokenForMailbox({
+        id: 'mb_x',
+        emailAddress: 'x@example.com',
+        microsoftDeltaCursor: null,
+      })
+      .catch((e) => e)) as InstanceType<typeof DeltaPollingTokenError>;
+    expect(error).toBeInstanceOf(DeltaPollingTokenError);
+    return error;
+  }
+
+  it('marks invalid_grant as reconnect_required', async () => {
+    const error = await classify(
+      new RefreshAccessTokenError('token_endpoint', 'rejected', {
+        microsoftErrorCode: 'invalid_grant',
+        httpStatus: 400,
+      }),
+    );
+    expect(error.classification).toBe('reconnect_required');
+  });
+
+  it('marks interaction_required as reconnect_required', async () => {
+    const error = await classify(
+      new RefreshAccessTokenError('token_endpoint', 'rejected', {
+        microsoftErrorCode: 'interaction_required',
+        httpStatus: 400,
+      }),
+    );
+    expect(error.classification).toBe('reconnect_required');
+  });
+
+  it('keeps a network/timeout error transient (no reconnect)', async () => {
+    const error = await classify(new RefreshAccessTokenError('network', 'timeout'));
+    expect(error.classification).toBe('transient');
+  });
+
+  it('keeps a Microsoft 429 transient (no reconnect)', async () => {
+    const error = await classify(
+      new RefreshAccessTokenError('token_endpoint', 'throttled', {
+        microsoftErrorCode: 'temporarily_unavailable',
+        httpStatus: 429,
+      }),
+    );
+    expect(error.classification).toBe('transient');
+  });
+
+  it('keeps a Microsoft 5xx transient (no reconnect)', async () => {
+    const error = await classify(
+      new RefreshAccessTokenError('token_endpoint', 'server error', {
+        httpStatus: 503,
+      }),
+    );
+    expect(error.classification).toBe('transient');
+  });
+
+  it('marks a missing refresh token as reconnect_required', async () => {
+    const { client } = mailboxClient(null);
+    const port = createPrismaAccessTokenPort(client as never);
+    const error = (await port
+      .getAccessTokenForMailbox({
+        id: 'mb_missing',
+        emailAddress: 'm@example.com',
+        microsoftDeltaCursor: null,
+      })
+      .catch((e) => e)) as InstanceType<typeof DeltaPollingTokenError>;
+    expect(error).toBeInstanceOf(DeltaPollingTokenError);
+    expect(error.classification).toBe('reconnect_required');
   });
 });
