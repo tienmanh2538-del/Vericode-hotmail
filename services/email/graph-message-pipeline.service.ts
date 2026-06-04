@@ -1023,7 +1023,9 @@ async function processActiveMailboxJob(
   // cannot trip Telegram's global bot rate limit. This wait is independently
   // capped by the pacer, so total delay stays bounded and routing is unchanged.
   if (deps.globalSendThrottle) {
-    const { waitMs } = deps.globalSendThrottle.reserve();
+    // TASK-070 — reserve() may be async (Redis-backed cross-process pacer); the
+    // in-memory pacer resolves synchronously so awaiting it is a no-op.
+    const { waitMs } = await deps.globalSendThrottle.reserve();
     if (waitMs > 0) {
       logger.info('Pacing Telegram send for global bot rate limit', {
         mailboxId: mailbox.id,

@@ -30,10 +30,13 @@ vi.mock('@/services/microsoft/refresh-token-rotation.service', () => ({
 
 import { RefreshAccessTokenError } from '@/services/microsoft/refresh-access-token.service';
 import {
+  buildGlobalSendThrottle,
   createPrismaEmailAccessTokenPort,
   createPrismaMailboxLookupPort,
   EmailWorkerTokenError,
+  isRedisConfiguredForPacer,
 } from '@/services/queue/workers/email-worker-runner';
+import type { RedisGlobalThrottleClient } from '@/services/queue/redis-global-send-throttle';
 
 beforeEach(() => {
   refreshMock.mockReset();
@@ -249,5 +252,38 @@ describe('createPrismaEmailAccessTokenPort — failure classification (TASK-069C
     expect(error).toBeInstanceOf(EmailWorkerTokenError);
     expect(error.classification).toBe('reconnect_required');
     expect(refreshMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('global send pacer wiring (TASK-070)', () => {
+  it('treats REDIS_URL presence as the gate for the cross-process pacer', () => {
+    expect(isRedisConfiguredForPacer({ REDIS_URL: 'redis://example:6379' })).toBe(
+      true,
+    );
+    expect(isRedisConfiguredForPacer({})).toBe(false);
+    expect(isRedisConfiguredForPacer({ REDIS_URL: '   ' })).toBe(false);
+  });
+
+  it('builds an in-memory pacer when no Redis client provider is supplied', async () => {
+    const throttle = buildGlobalSendThrottle(null);
+    // First reservation is immediate; the result is a plain reservation, never a
+    // Redis round-trip (there is no client to call).
+    const reservation = await throttle.reserve();
+    expect(reservation.waitMs).toBe(0);
+    expect(typeof reservation.waitMs).toBe('number');
+  });
+
+  it('builds a Redis-backed pacer when a client provider is supplied', async () => {
+    const evalMock = vi.fn(async () => 0);
+    const client: RedisGlobalThrottleClient = { eval: evalMock };
+    const throttle = buildGlobalSendThrottle(async () => client);
+
+    await throttle.reserve();
+
+    // The Redis backend reserves the slot via the shared client's eval.
+    expect(evalMock).toHaveBeenCalledTimes(1);
+    const [script, numKeys] = evalMock.mock.calls[0] as unknown[];
+    expect(typeof script).toBe('string');
+    expect(numKeys).toBe(1);
   });
 });

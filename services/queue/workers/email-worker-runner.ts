@@ -41,10 +41,9 @@ import {
   createInMemoryDestinationThrottle,
   type DestinationThrottle,
 } from '@/services/queue/destination-throttle';
-import {
-  createInMemoryGlobalSendThrottle,
-  type GlobalSendThrottle,
-} from '@/services/queue/global-send-throttle';
+import { type GlobalSendThrottle } from '@/services/queue/global-send-throttle';
+import { createGlobalSendThrottle } from '@/services/queue/global-send-throttle-factory';
+import type { RedisGlobalThrottleClient } from '@/services/queue/redis-global-send-throttle';
 import { getWorkerMetricsRecorder } from '@/services/observability/redis-worker-metrics';
 import type { EmailWorkerPipeline } from './email-worker';
 
@@ -67,8 +66,12 @@ const sharedDestinationThrottle: DestinationThrottle =
 // TASK-068B — one process-wide bot pacer shared across every job so all sends
 // pace against the same global slot (Telegram's ~30/s per-bot ceiling), on top
 // of the per-destination spacing above. Defaults are conservative and capped.
-const sharedGlobalSendThrottle: GlobalSendThrottle =
-  createInMemoryGlobalSendThrottle();
+// TASK-070 — when Redis is configured (production), the pacer is Redis-backed so
+// EVERY worker replica shares ONE global slot (the in-memory pacer only spaced
+// sends within a single process). Without Redis (local/test) it stays in-memory,
+// so existing behaviour is unchanged. The Redis pacer fails safe to in-process
+// pacing on any Redis problem — a Redis blip never blocks code delivery.
+const sharedGlobalSendThrottle: GlobalSendThrottle = buildSharedGlobalSendThrottle();
 
 // TASK-068B — conservative bounded fairness for a busy per-mailbox lock. Instead
 // of immediately deferring (→ a queue re-attempt with backoff, burning an
@@ -81,6 +84,53 @@ const DEFAULT_BUSY_DEFER_RETRY = {
   delayMs: 250,
   maxTotalWaitMs: 1_000,
 } as const;
+
+// ---------------------------------------------------------------------------
+// TASK-070 — global send pacer backend selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Is a real Redis deployment configured? Gate the cross-process pacer on an
+ * explicitly-set `REDIS_URL` (read raw, not via `loadQueueEnv` which defaults to
+ * localhost). In production `REDIS_URL` is always set; in local/test it is not, so
+ * the pacer stays in-memory and behaviour is unchanged.
+ */
+export function isRedisConfiguredForPacer(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env.REDIS_URL;
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * Resolve the shared BullMQ queue's ioredis client for the pacer. Reusing the
+ * queue's own client (same approach as the TASK-068C worker metrics) means no
+ * extra top-level `ioredis` dependency and no new socket opened just for pacing.
+ * Imported lazily so this module has no Redis side effect at import time.
+ */
+async function resolveSharedQueueRedisClientForPacer(): Promise<RedisGlobalThrottleClient> {
+  const { getEmailQueue } = await import('@/services/queue/email-queue');
+  const client = await getEmailQueue().client;
+  return client as unknown as RedisGlobalThrottleClient;
+}
+
+/**
+ * Build the global send pacer for a given Redis-client provider. Exposed so the
+ * wiring (Redis-backed vs in-memory fallback) is unit-testable without a real
+ * Redis connection.
+ */
+export function buildGlobalSendThrottle(
+  getRedisClient: (() => Promise<RedisGlobalThrottleClient>) | null,
+): GlobalSendThrottle {
+  return createGlobalSendThrottle({ getRedisClient });
+}
+
+/** The process-wide pacer: Redis-backed when configured, in-memory otherwise. */
+export function buildSharedGlobalSendThrottle(): GlobalSendThrottle {
+  return buildGlobalSendThrottle(
+    isRedisConfiguredForPacer() ? resolveSharedQueueRedisClientForPacer : null,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Mailbox lookup port

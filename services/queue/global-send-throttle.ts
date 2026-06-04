@@ -39,7 +39,22 @@ export const DEFAULT_GLOBAL_SEND_MAX_WAIT_MS = 2_000;
 const GLOBAL_SEND_KEY = 'telegram-bot::global';
 
 export interface GlobalSendThrottle {
-  /** Reserve the next globally-paced send slot. */
+  /**
+   * Reserve the next globally-paced send slot.
+   *
+   * TASK-070 — the result may be a Promise: the in-memory pacer resolves
+   * synchronously (unchanged), but a cross-process Redis-backed pacer must do a
+   * round-trip. Callers `await` the result, which is a no-op for the sync case.
+   */
+  reserve(): DestinationReservation | Promise<DestinationReservation>;
+}
+
+/**
+ * Narrower variant whose `reserve()` is always synchronous. The in-memory pacer
+ * returns this so existing synchronous callers/tests keep working; it is still
+ * assignable to {@link GlobalSendThrottle}.
+ */
+export interface SyncGlobalSendThrottle extends GlobalSendThrottle {
   reserve(): DestinationReservation;
 }
 
@@ -60,7 +75,7 @@ export interface InMemoryGlobalSendThrottleOptions {
  */
 export function createInMemoryGlobalSendThrottle(
   options: InMemoryGlobalSendThrottleOptions = {},
-): GlobalSendThrottle {
+): SyncGlobalSendThrottle {
   const minIntervalMs =
     typeof options.minIntervalMs === 'number' && options.minIntervalMs > 0
       ? options.minIntervalMs
