@@ -19,6 +19,8 @@ import { join } from 'node:path';
 import { prisma } from '@/lib/prisma';
 import { loadEnv, type AppEnv } from '@/lib/env';
 import type { CustomerScope } from '@/lib/auth/access-scope';
+import type { InfraObservability } from '@/services/observability/observability.types';
+import type { InfraObservabilityLoader } from '@/services/observability/infra-observability.service';
 import {
   deriveMailboxReadiness,
   type MailboxReadiness,
@@ -617,11 +619,25 @@ function buildOverview(
  * assigned scope fails closed (zero rows). System-wide operational checks are
  * only built for the unrestricted scope so global infra signals never leak.
  */
+export interface LoadHealthDashboardDeps {
+  /**
+   * TASK-068C — infra observability loader. Defaults to a null loader so the
+   * dashboard performs NO queue/Redis I/O unless the caller opts in. The page
+   * injects the production loader (`loadInfraObservability`); unit tests that
+   * exercise the DB aggregation stay free of Redis side effects.
+   */
+  loadInfra?: InfraObservabilityLoader;
+}
+
+const nullInfraLoader: InfraObservabilityLoader = async () => null;
+
 export async function loadHealthDashboard(
   scope: CustomerScope,
   now: Date = new Date(),
+  deps: LoadHealthDashboardDeps = {},
 ): Promise<HealthLoadResult> {
   const isUnrestricted = scope.kind === 'all';
+  const loadInfra = deps.loadInfra ?? nullInfraLoader;
   try {
     // TASK-056 — STAFF only sees mailboxes whose customer is assigned to them.
     // A mailbox with no customer is never in an 'assigned' scope.
@@ -856,11 +872,22 @@ export async function loadHealthDashboard(
 
     const workload = buildCustomerWorkload(mailboxes);
 
+    // TASK-068C — queue/worker observability. The loader is scope-gated (null
+    // for STAFF) and best-effort by contract; this guard is defence in depth so
+    // an infra read can never fail the whole dashboard.
+    let infra: InfraObservability | null = null;
+    try {
+      infra = await loadInfra(scope, now);
+    } catch {
+      infra = null;
+    }
+
     const data: HealthDashboardData = {
       overview,
       mailboxes,
       workload,
       operationalChecks,
+      infra,
       isUnrestricted,
       generatedAt: now,
     };

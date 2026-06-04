@@ -1,6 +1,11 @@
 import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import { requireAdminAccess } from '@/lib/auth/guards';
 import { loadHealthDashboard } from '@/services/health/health.service';
+import { loadInfraObservability } from '@/services/observability/infra-observability.service';
+import type {
+  InfraObservability,
+  ObservabilityStatus,
+} from '@/services/observability/observability.types';
 import type {
   CustomerWorkloadRow,
   HealthLevel,
@@ -30,6 +35,28 @@ const CHECK_CLASS: Record<OperationalCheckStatus, string> = {
   CRITICAL: 'health-badge health-badge--critical',
   UNKNOWN: 'health-badge health-badge--unknown',
 };
+
+const OBS_STATUS_CLASS: Record<ObservabilityStatus, string> = {
+  OK: 'health-badge health-badge--ok',
+  WARN: 'health-badge health-badge--warning',
+  CRITICAL: 'health-badge health-badge--critical',
+  UNKNOWN: 'health-badge health-badge--unknown',
+};
+
+function formatMs(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return '—';
+  return `${ms} ms`;
+}
+
+function formatAge(ms: number | null): string {
+  if (ms === null) return '—';
+  if (ms < 1000) return `${ms} ms`;
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
 
 function formatDateTime(date: Date | null): string {
   if (!date) return '—';
@@ -130,6 +157,124 @@ function OperationalChecksSection({ checks }: { checks: OperationalCheck[] }) {
   );
 }
 
+function InfraStatusBadge({ status }: { status: ObservabilityStatus }) {
+  return <span className={OBS_STATUS_CLASS[status]}>{status}</span>;
+}
+
+/**
+ * TASK-068C — read-only queue backlog + worker latency + throttle/defer view.
+ * OWNER/ADMIN only (the service returns null infra for STAFF). No action
+ * controls (no scale/retry/purge) — this is purely a visibility surface, and a
+ * degraded read renders an Unknown/Degraded note instead of crashing.
+ */
+function InfraObservabilitySection({ infra }: { infra: InfraObservability }) {
+  const { queue, worker } = infra;
+  const workerWindowMinutes = Math.round(worker.windowMs / 60_000);
+  return (
+    <section className="health-section" aria-labelledby="health-infra-heading">
+      <h3 id="health-infra-heading" className="health-section__title">
+        Queue &amp; worker observability
+      </h3>
+
+      <div className="health-check__head">
+        <span className="health-check__label">
+          Queue backlog — {queue.queueName} ({queue.availability})
+        </span>
+        <InfraStatusBadge status={queue.status} />
+      </div>
+      {queue.counts ? (
+        <section
+          className="admin-card-grid health-overview"
+          aria-label="Queue backlog"
+        >
+          <OverviewCard
+            label="Backlog total"
+            value={queue.backlogTotal ?? 0}
+            tone={
+              queue.status === 'CRITICAL'
+                ? 'critical'
+                : queue.status === 'WARN'
+                  ? 'warning'
+                  : 'neutral'
+            }
+          />
+          <OverviewCard label="Waiting" value={queue.counts.waiting} />
+          <OverviewCard label="Active" value={queue.counts.active} />
+          <OverviewCard label="Delayed" value={queue.counts.delayed} />
+          <OverviewCard label="Failed" value={queue.counts.failed} />
+          <OverviewCard
+            label="Oldest waiting"
+            value={formatAge(queue.oldestWaitingAgeMs)}
+          />
+        </section>
+      ) : (
+        <p className="health-check__detail">
+          Queue metrics unavailable — Redis/BullMQ could not be read. Status is
+          shown as Unknown; the dashboard keeps working.
+        </p>
+      )}
+
+      <div className="health-check__head">
+        <span className="health-check__label">
+          Worker latency &amp; throttle (last {workerWindowMinutes}m,{' '}
+          {worker.availability})
+        </span>
+        <InfraStatusBadge status={worker.status} />
+      </div>
+      {worker.jobs ? (
+        <section
+          className="admin-card-grid health-overview"
+          aria-label="Worker metrics"
+        >
+          <OverviewCard label="Jobs completed" value={worker.jobs.completed} />
+          <OverviewCard
+            label="Jobs failed"
+            value={worker.jobs.failed}
+            tone={worker.jobs.failed > 0 ? 'critical' : 'neutral'}
+          />
+          <OverviewCard label="Jobs skipped" value={worker.jobs.skipped} />
+          <OverviewCard
+            label="Mailbox-busy defers"
+            value={worker.mailboxBusyDefer?.count ?? 0}
+            tone={
+              (worker.mailboxBusyDefer?.count ?? 0) > 0 ? 'warning' : 'neutral'
+            }
+          />
+          <OverviewCard
+            label="Queue wait avg"
+            value={formatMs(worker.queueWait?.avgMs)}
+          />
+          <OverviewCard
+            label="Queue wait max"
+            value={formatMs(worker.queueWait?.maxMs)}
+          />
+          <OverviewCard
+            label="Processing avg"
+            value={formatMs(worker.processing?.avgMs)}
+          />
+          <OverviewCard
+            label="Processing max"
+            value={formatMs(worker.processing?.maxMs)}
+          />
+          <OverviewCard
+            label="Destination throttle waits"
+            value={worker.destinationThrottle?.count ?? 0}
+          />
+          <OverviewCard
+            label="Global pacing waits"
+            value={worker.globalThrottle?.count ?? 0}
+          />
+        </section>
+      ) : (
+        <p className="health-check__detail">
+          Worker metrics unavailable — the metrics store could not be read, or no
+          jobs ran in the window. Status is shown as Unknown.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function MailboxHealthTable({ mailboxes }: { mailboxes: MailboxHealthRow[] }) {
   return (
     <section className="health-section" aria-labelledby="health-mailboxes-heading">
@@ -221,7 +366,12 @@ export default async function HealthDashboardPage() {
     );
   }
 
-  const result = await loadHealthDashboard(scope);
+  // TASK-068C — inject the production infra-observability loader. It is
+  // scope-gated (null for STAFF) and best-effort, so STAFF never trigger the
+  // global queue/Redis reads and a degraded read can never crash the page.
+  const result = await loadHealthDashboard(scope, undefined, {
+    loadInfra: loadInfraObservability,
+  });
 
   return (
     <>
@@ -252,6 +402,9 @@ export default async function HealthDashboardPage() {
             </p>
           </div>
           <OperationalChecksSection checks={result.data.operationalChecks} />
+          {result.data.infra ? (
+            <InfraObservabilitySection infra={result.data.infra} />
+          ) : null}
         </>
       ) : (
         <>
@@ -325,6 +478,10 @@ export default async function HealthDashboardPage() {
           <WorkloadSection rows={result.data.workload} />
 
           <OperationalChecksSection checks={result.data.operationalChecks} />
+
+          {result.data.infra ? (
+            <InfraObservabilitySection infra={result.data.infra} />
+          ) : null}
 
           <MailboxHealthTable mailboxes={result.data.mailboxes} />
         </>

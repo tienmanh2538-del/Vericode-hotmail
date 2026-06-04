@@ -5,8 +5,16 @@ import { createLogger } from '@/lib/logger';
 import type {
   GraphMessagePipelineDeps,
   GraphMessagePipelineResult,
+  GraphMessagePipelineStatus,
   GraphMessageProcessingJob,
 } from '@/services/email/graph-message-pipeline.service';
+import {
+  createNoopWorkerMetricsRecorder,
+  recordWorkerMetricSafely,
+  type WorkerJobResult,
+  type WorkerMetricsRecorder,
+} from '@/services/observability/worker-metrics';
+import { getWorkerMetricsRecorder } from '@/services/observability/redis-worker-metrics';
 
 import {
   EMAIL_DELTA_POLLING_JOB_SOURCE,
@@ -83,6 +91,48 @@ export class EmailWorkerProcessingError extends Error {
 }
 
 /**
+ * TASK-068C — map a pipeline status to the coarse worker-metrics category. Only
+ * the category (not the full status) is recorded, keeping metrics aggregate.
+ */
+export function classifyWorkerJobResult(
+  status: GraphMessagePipelineStatus,
+): WorkerJobResult {
+  if (status === 'CODE_SENT') return 'completed';
+  if (status === 'DEFERRED_MAILBOX_BUSY') return 'deferred';
+  if (status.startsWith('FAILED_')) return 'failed';
+  return 'skipped';
+}
+
+export interface ProcessEmailWebhookJobOptions {
+  /** Best-effort metrics sink. Defaults to a no-op (existing callers/tests). */
+  metrics?: WorkerMetricsRecorder;
+  /** Epoch-ms clock, injectable for deterministic latency tests. */
+  now?: () => number;
+}
+
+const noopWorkerMetricsRecorder = createNoopWorkerMetricsRecorder();
+
+/**
+ * Time a job waited in the queue: now (processing start) minus the job's
+ * enqueue timestamp. Returns null when the timestamp is missing/implausible
+ * (e.g. a hand-built test job) so we never record a bogus negative latency.
+ */
+function computeQueueWaitMs(
+  job: Job<EmailJobData>,
+  startedAtMs: number,
+): number | null {
+  const timestamp = (job as { timestamp?: number }).timestamp;
+  if (
+    typeof timestamp === 'number' &&
+    Number.isFinite(timestamp) &&
+    timestamp <= startedAtMs
+  ) {
+    return startedAtMs - timestamp;
+  }
+  return null;
+}
+
+/**
  * TASK-027 worker. Receives validated `PROCESS_MICROSOFT_GRAPH_MESSAGE` jobs
  * and forwards them to the Graph message pipeline (load mailbox → fetch Graph
  * → detector → extractor → dedupe → Telegram).
@@ -91,11 +141,19 @@ export class EmailWorkerProcessingError extends Error {
  * BullMQ does not retry deterministic skips like NO_TELEGRAM_MAPPING. It does
  * throw for transient failures (FAILED_GRAPH_FETCH, FAILED_RECONNECT_REQUIRED,
  * FAILED_TELEGRAM_SEND) so BullMQ retries based on `attempts/backoff`.
+ *
+ * TASK-068C — measures queue-wait + processing-duration and records an
+ * aggregate worker-metrics sample (best-effort; never blocks or throws, and
+ * carries only the result category + two ms durations — no payload).
  */
 export async function processEmailWebhookJob(
   job: Job<EmailJobData>,
   pipeline?: EmailWorkerPipeline,
+  options: ProcessEmailWebhookJobOptions = {},
 ): Promise<GraphMessagePipelineResult | { acknowledged: true }> {
+  const metrics = options.metrics ?? noopWorkerMetricsRecorder;
+  const nowMs = options.now ?? (() => Date.now());
+
   if (job.name !== EMAIL_QUEUE_JOB_NAMES.PROCESS_MICROSOFT_GRAPH_MESSAGE) {
     logger.warn('Email worker received unknown job name', {
       jobName: job.name,
@@ -115,7 +173,12 @@ export async function processEmailWebhookJob(
     attemptsMade: job.attemptsMade,
   });
 
+  const startedAtMs = nowMs();
+  const queueWaitMs = computeQueueWaitMs(job, startedAtMs);
+
   const result = await runPipeline(toPipelineJob(job.data));
+
+  const processingDurationMs = Math.max(0, nowMs() - startedAtMs);
 
   logger.info('Email worker pipeline result', {
     jobName: job.name,
@@ -125,6 +188,15 @@ export async function processEmailWebhookJob(
     status: result.status,
     sentToTelegram: result.sentToTelegram ?? false,
   });
+
+  // TASK-068C — aggregate worker-metrics sample. Best-effort and payload-free.
+  recordWorkerMetricSafely(() =>
+    metrics.recordJobResult({
+      result: classifyWorkerJobResult(result.status),
+      queueWaitMs,
+      processingDurationMs,
+    }),
+  );
 
   // Transient failures should trigger BullMQ retry. Skips and CODE_SENT are
   // terminal — returning the envelope lets the queue treat them as complete.
@@ -183,9 +255,13 @@ export function createEmailWorker(
   const { max, durationMs } = loadEmailWorkerRateLimitEnv();
   const limiter = options.limiter ?? { max, duration: durationMs };
 
+  // TASK-068C — production worker records aggregate latency/result metrics to
+  // the shared Redis store so OWNER/ADMIN can see worker health. Best-effort.
+  const metrics = getWorkerMetricsRecorder();
+
   const worker = new Worker<EmailJobData>(
     queueName,
-    (job) => processEmailWebhookJob(job, pipeline),
+    (job) => processEmailWebhookJob(job, pipeline, { metrics }),
     {
       connection: getRedisConnectionOptions(),
       concurrency,

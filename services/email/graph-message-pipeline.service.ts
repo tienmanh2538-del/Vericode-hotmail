@@ -49,6 +49,10 @@ import {
   type DestinationThrottle,
 } from '@/services/queue/destination-throttle';
 import type { GlobalSendThrottle } from '@/services/queue/global-send-throttle';
+import {
+  recordWorkerMetricSafely,
+  type WorkerMetricsRecorder,
+} from '@/services/observability/worker-metrics';
 import { createLogger, type Logger } from '@/lib/logger';
 
 const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
@@ -189,6 +193,12 @@ export interface GraphMessagePipelineDeps {
   };
   // Injectable sleep so the throttle delay is instant under test.
   sleep?: (ms: number) => Promise<void>;
+  // TASK-068C — best-effort observability sink. When present, the pipeline
+  // records aggregate throttle/defer signals (mailbox-busy defer, destination
+  // throttle wait, global pacing wait). Every call is wrapped so a metrics
+  // failure can never break delivery, and only counts/durations are recorded —
+  // never a code, email body, token, or destination id. Absent ⇒ no recording.
+  metrics?: WorkerMetricsRecorder;
 }
 
 interface NormalizedJob {
@@ -450,6 +460,8 @@ export async function processGraphMessageJob(
     logger.info('Graph message job deferred: mailbox is busy', {
       mailboxId: normalized.mailboxId,
     });
+    // TASK-068C — aggregate-only signal (no code/email/token). Best-effort.
+    recordWorkerMetricSafely(() => deps.metrics?.recordMailboxBusyDefer());
     return {
       ok: false,
       status: 'DEFERRED_MAILBOX_BUSY',
@@ -976,6 +988,10 @@ async function processActiveMailboxJob(
         mailboxId: mailbox.id,
         waitMs,
       });
+      // TASK-068C — record the throttle wait (ms only). Best-effort.
+      recordWorkerMetricSafely(() =>
+        deps.metrics?.recordDestinationThrottleWait(waitMs),
+      );
       const sleep = deps.sleep ?? defaultSleep;
       await sleep(waitMs);
     }
@@ -992,6 +1008,10 @@ async function processActiveMailboxJob(
         mailboxId: mailbox.id,
         waitMs,
       });
+      // TASK-068C — record the global pacing wait (ms only). Best-effort.
+      recordWorkerMetricSafely(() =>
+        deps.metrics?.recordGlobalThrottleWait(waitMs),
+      );
       const sleep = deps.sleep ?? defaultSleep;
       await sleep(waitMs);
     }

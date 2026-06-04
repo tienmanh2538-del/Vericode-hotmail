@@ -41,6 +41,7 @@ import {
   createInMemoryGlobalSendThrottle,
   type GlobalSendThrottle,
 } from '@/services/queue/global-send-throttle';
+import { getWorkerMetricsRecorder } from '@/services/observability/redis-worker-metrics';
 import type { EmailWorkerPipeline } from './email-worker';
 
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
@@ -276,6 +277,10 @@ export function buildDefaultEmailPipelineDeps(
       overrides.globalSendThrottle ?? sharedGlobalSendThrottle,
     busyDeferRetry: overrides.busyDeferRetry ?? DEFAULT_BUSY_DEFER_RETRY,
     sleep: overrides.sleep,
+    // TASK-068C — record aggregate throttle/defer signals to the shared Redis
+    // store (same store the worker latency metrics use) for cross-process
+    // visibility on the health dashboard. Best-effort; never affects delivery.
+    metrics: overrides.metrics ?? getWorkerMetricsRecorder(),
   };
 }
 

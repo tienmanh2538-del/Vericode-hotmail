@@ -4,6 +4,7 @@
 // carries a token, refresh token, client secret, clientState(Hash), full
 // verification code, or email body — only derived status + sanitized strings.
 
+import type { InfraObservability } from '@/services/observability/observability.types';
 import type { MailboxReadiness } from '@/lib/mailboxes/mailbox-list-filter';
 import type {
   GraphSubscriptionStatusValue,
@@ -123,6 +124,12 @@ export interface HealthDashboardData {
    * so global infrastructure signals never leak across the scope boundary.
    */
   operationalChecks: OperationalCheck[];
+  /**
+   * TASK-068C — queue backlog + worker latency + throttle/defer observability.
+   * Global infrastructure signals, so this is only populated for OWNER/ADMIN
+   * (unrestricted scope); STAFF_READ_ONLY always receives null.
+   */
+  infra: InfraObservability | null;
   /** True for OWNER/ADMIN; false when the data is narrowed to assigned scope. */
   isUnrestricted: boolean;
   generatedAt: Date;
