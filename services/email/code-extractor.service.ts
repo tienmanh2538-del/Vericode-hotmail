@@ -1,3 +1,11 @@
+import {
+  CODE_NOUN_KEYWORDS,
+  CODE_PHRASE_PATTERNS,
+  NEGATIVE_KEYWORDS,
+  STRONG_VERIFICATION_KEYWORDS,
+  VERIFICATION_CONTEXT_KEYWORDS,
+} from './verification-keywords';
+
 export type CodeExtractorInput = {
   subject?: string;
   bodyText?: string;
@@ -33,95 +41,17 @@ export type CodeExtractionResult =
       reason: string;
     };
 
-const STRONG_KEYWORDS_EN: readonly string[] = [
-  'security code',
-  'confirmation code',
-  'verification code',
-  'login code',
-  'one-time code',
-  'one time code',
-  'two-factor code',
-  '2fa code',
-  'facebook code',
-  'meta code',
-];
-
-const STRONG_KEYWORDS_VI: readonly string[] = [
-  'mã xác minh',
-  'mã xác nhận',
-  'mã bảo mật',
-  'mã đăng nhập',
-  'mã một lần',
-  'mã facebook',
-  'mã meta',
-  'mã xác thực',
-];
-
-const WEAK_KEYWORDS_EN: readonly string[] = ['code'];
-const WEAK_KEYWORDS_VI: readonly string[] = ['mã'];
-
-// Brand / verification-intent words. In a real Facebook/Meta email the security
-// framing ("verify your Facebook account for security") is often phrased around
-// the code rather than as the exact "<x> code" bigram the strong list expects.
-// This mirrors the trusted vocabulary the upstream detector already accepts, so
-// an email the detector treats as Facebook verification is not then rejected by
-// the extractor purely for lacking an adjacent keyword phrase. It is a modest
-// fallback signal, only applied near the candidate and only when no strong
-// keyword matched — it cannot, on its own, push noise over the threshold.
-const BRAND_CONTEXT_KEYWORDS_EN: readonly string[] = [
-  'facebook',
-  'meta',
-  'instagram',
-  'verify',
-  'verification',
-  'security',
-  'confirm',
-  'confirmation',
-  'login',
-  'sign in',
-  'sign-in',
-  'two-factor',
-  'two factor',
-  '2fa',
-];
-
-const BRAND_CONTEXT_KEYWORDS_VI: readonly string[] = [
-  'xác minh',
-  'xác nhận',
-  'xác thực',
-  'bảo mật',
-  'đăng nhập',
-];
-
-const NEGATIVE_KEYWORDS: readonly string[] = [
-  'case',
-  'ticket',
-  'invoice',
-  'phone',
-  'tel:',
-  'ip:',
-  'ipv4',
-  'ipv6',
-  'address',
-  'reference',
-  'ref:',
-  'order',
-  'tracking',
-  'số điện thoại',
-  'điện thoại',
-  'hóa đơn',
-  'số hóa đơn',
-  'đơn hàng',
-];
-
-const PHRASE_PATTERNS: readonly RegExp[] = [
-  /is your[^.\n]{0,40}code/i,
-  /your[^.\n]{0,40}code is\s+\d/i,
-  /code is\s+\d/i,
-  /code:\s*\d/i,
-  /của bạn là\s+\d/i,
-  /mã[^.\n]{0,40}là\s+\d/i,
-];
+// Keyword vocabulary is shared with the detector via `verification-keywords.ts`
+// so the two layers cannot drift. Local aliases keep the scoring code below
+// readable and map the shared lists onto the roles the extractor uses:
+//   STRONG_KEYWORDS         — high-precision "<intent> code" phrases (+strong)
+//   WEAK_KEYWORDS           — the bare localized "code" noun (+weak)
+//   BRAND_CONTEXT_KEYWORDS  — brand / intent fallback near the candidate (+15)
+//   NEGATIVE_KEYWORDS / PHRASE_PATTERNS — shared as-is.
+const STRONG_KEYWORDS = STRONG_VERIFICATION_KEYWORDS;
+const WEAK_KEYWORDS = CODE_NOUN_KEYWORDS;
+const BRAND_CONTEXT_KEYWORDS = VERIFICATION_CONTEXT_KEYWORDS;
+const PHRASE_PATTERNS = CODE_PHRASE_PATTERNS;
 
 const SCORE = {
   SIX_DIGITS: 30,
@@ -309,9 +239,7 @@ function scoreCandidate(
   const start = raw.index;
   const end = raw.index + raw.code.length;
 
-  const strongEn = findClosestKeyword(textLower, start, end, STRONG_KEYWORDS_EN);
-  const strongVi = findClosestKeyword(textLower, start, end, STRONG_KEYWORDS_VI);
-  const strong = pickClosest(strongEn, strongVi);
+  const strong = findClosestKeyword(textLower, start, end, STRONG_KEYWORDS);
 
   let strongApplied = false;
   if (strong !== null && strong.distance <= STRONG_CONTEXT_WINDOW) {
@@ -325,27 +253,18 @@ function scoreCandidate(
   }
 
   if (!strongApplied) {
-    const weakEn = findClosestKeyword(textLower, start, end, WEAK_KEYWORDS_EN);
-    const weakVi = findClosestKeyword(textLower, start, end, WEAK_KEYWORDS_VI);
-    const weak = pickClosest(weakEn, weakVi);
+    const weak = findClosestKeyword(textLower, start, end, WEAK_KEYWORDS);
     if (weak !== null && weak.distance <= STRONG_CONTEXT_WINDOW) {
       score += SCORE.WEAK_KEYWORD_NEAR;
       reasons.push('weak_keyword_near');
     }
 
-    const brandEn = findClosestKeyword(
+    const brand = findClosestKeyword(
       textLower,
       start,
       end,
-      BRAND_CONTEXT_KEYWORDS_EN,
+      BRAND_CONTEXT_KEYWORDS,
     );
-    const brandVi = findClosestKeyword(
-      textLower,
-      start,
-      end,
-      BRAND_CONTEXT_KEYWORDS_VI,
-    );
-    const brand = pickClosest(brandEn, brandVi);
     if (brand !== null && brand.distance <= STRONG_CONTEXT_WINDOW) {
       score += SCORE.BRAND_CONTEXT_NEAR;
       reasons.push('brand_context_near');
@@ -374,18 +293,14 @@ function scoreCandidate(
 
   if (raw.source === 'subject') {
     const subjectHasKeyword =
-      hasAny(context.subjectLower, STRONG_KEYWORDS_EN) ||
-      hasAny(context.subjectLower, STRONG_KEYWORDS_VI) ||
-      hasAny(context.subjectLower, WEAK_KEYWORDS_EN) ||
-      hasAny(context.subjectLower, WEAK_KEYWORDS_VI);
+      hasAny(context.subjectLower, STRONG_KEYWORDS) ||
+      hasAny(context.subjectLower, WEAK_KEYWORDS);
     if (subjectHasKeyword) {
       score += SCORE.IN_SUBJECT_WITH_KEYWORD;
       reasons.push('subject_has_keyword');
     }
   } else {
-    const bodyHasStrong =
-      hasAny(context.bodyLower, STRONG_KEYWORDS_EN) ||
-      hasAny(context.bodyLower, STRONG_KEYWORDS_VI);
+    const bodyHasStrong = hasAny(context.bodyLower, STRONG_KEYWORDS);
     if (bodyHasStrong) {
       score += SCORE.IN_BODY_WITH_KEYWORD;
       reasons.push('body_has_strong_keyword');

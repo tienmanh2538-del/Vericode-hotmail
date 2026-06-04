@@ -1,3 +1,10 @@
+import {
+  CODE_CONTEXT_KEYWORDS,
+  DETECTOR_BODY_KEYWORDS,
+  DETECTOR_SUBJECT_KEYWORDS,
+  MARKETING_KEYWORDS,
+} from './verification-keywords';
+
 export type DetectorEmailInput = {
   from?: string;
   sender?: string;
@@ -24,79 +31,6 @@ const TRUSTED_META_DOMAINS = [
   'meta.com',
   'metamail.com',
 ] as const;
-
-const SUBJECT_KEYWORDS_EN = [
-  'facebook',
-  'meta',
-  'instagram',
-  'confirmation code',
-  'security code',
-  'login code',
-  'verification code',
-  'confirm your account',
-  'account confirmation',
-  'two-factor authentication',
-  '2fa',
-];
-
-const SUBJECT_KEYWORDS_VI = [
-  'mã xác nhận',
-  'mã bảo mật',
-  'mã xác minh',
-  'mã đăng nhập',
-  'xác minh tài khoản',
-  'mã xác thực',
-];
-
-const BODY_KEYWORDS_EN = [
-  'confirmation code',
-  'security code',
-  'login code',
-  'verification code',
-  'confirm your account',
-  'two-factor authentication',
-  '2fa',
-];
-
-const BODY_KEYWORDS_VI = [
-  'mã xác nhận',
-  'mã bảo mật',
-  'mã xác minh',
-  'mã đăng nhập',
-  'xác minh tài khoản',
-  'mã xác thực',
-];
-
-const CODE_CONTEXT_KEYWORDS = [
-  'code',
-  'security code',
-  'confirmation code',
-  'verification code',
-  'login code',
-  'mã xác minh',
-  'mã bảo mật',
-  'mã xác nhận',
-  'mã xác thực',
-  'mã đăng nhập',
-];
-
-const MARKETING_KEYWORDS = [
-  'receipt',
-  'invoice',
-  'ads summary',
-  'ad summary',
-  'weekly report',
-  'weekly digest',
-  'monthly report',
-  'newsletter',
-  'unsubscribe',
-  'policy update',
-  'terms update',
-  'promotion',
-  'hóa đơn',
-  'biên lai',
-  'bản tin',
-];
 
 const NON_VERIFICATION_PHRASES = [
   'new login alert',
@@ -287,17 +221,13 @@ export function detectFacebookVerificationEmail(
     }
   }
 
-  const subjectKeywordMatch =
-    containsAny(subjectLower, SUBJECT_KEYWORDS_EN) ||
-    containsAny(subjectLower, SUBJECT_KEYWORDS_VI);
+  const subjectKeywordMatch = containsAny(subjectLower, DETECTOR_SUBJECT_KEYWORDS);
   if (subjectKeywordMatch) {
     matchedSignals.push('subject_keyword_match');
     score += SCORE.SUBJECT_KEYWORD;
   }
 
-  const bodyKeywordMatch =
-    containsAny(bodyLower, BODY_KEYWORDS_EN) ||
-    containsAny(bodyLower, BODY_KEYWORDS_VI);
+  const bodyKeywordMatch = containsAny(bodyLower, DETECTOR_BODY_KEYWORDS);
   if (bodyKeywordMatch) {
     matchedSignals.push('body_keyword_match');
     score += SCORE.BODY_KEYWORD;
