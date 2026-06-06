@@ -72,8 +72,10 @@ Gemini review.
 
 ## Lệnh kiểm tra
 
+Trước khi audit, xác nhận đang làm trên vùng làm việc Git riêng cho TASK-072 và
+kiểm tra trạng thái Git sạch, rồi chạy bộ kiểm tra:
+
 ```bash
-git branch --show-current
 git status --short
 git diff --stat
 npm run verify
@@ -81,7 +83,7 @@ npm run verify
 
 ## Tiêu chí nghiệm thu
 
-- Đã ở branch riêng `feature/task-072-full-project-audit`.
+- Claude xác nhận đang làm trên vùng làm việc Git riêng cho TASK-072.
 - Tạo đúng 2 file docs ở trên, không sửa file runtime/test/schema/migration/CI.
 - Report phân loại findings rõ ràng theo Critical/High/Medium/Low kèm file, cách
   kiểm tra, đề xuất task fix.

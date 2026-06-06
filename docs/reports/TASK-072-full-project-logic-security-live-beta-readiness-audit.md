@@ -42,7 +42,8 @@
 
 ## 3. Baseline repo/test
 
-- Branch: `feature/task-072-full-project-audit` (tách từ nhánh task-071).
+- Claude xác nhận đang làm trên vùng làm việc Git riêng cho TASK-072, tách ra từ
+  vùng làm việc của TASK-071. Trạng thái Git được kiểm tra trước khi audit.
 - Working tree sạch trước khi tạo 2 file docs của task này.
 - Test suite hiện hành: theo report TASK-071, `npm run verify` PASS với toàn bộ
   unit/integration/e2e (mốc ~1065 tests). Task-072 chạy lại để xác nhận — mục 10.
@@ -164,7 +165,6 @@
 ## 10. Lệnh đã chạy và kết quả
 
 ```bash
-git branch --show-current      # feature/task-072-full-project-audit
 git status --short             # chỉ 2 file docs của task này
 git diff --stat                # (docs, không đụng runtime/test)
 npm run verify                 # db:generate + lint + typecheck + test + build
