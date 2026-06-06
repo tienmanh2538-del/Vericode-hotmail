@@ -213,10 +213,17 @@ export function classifyRenewError(error: unknown): RenewFailureKind {
       ? (error as { httpStatus?: unknown }).httpStatus
       : undefined;
 
-  if (kind === 'auth' || kind === 'permission') {
-    // 401/403 on a freshly-minted access token means the grant is no longer
-    // usable for this mailbox — surface as reconnect-required.
+  if (kind === 'auth') {
+    // HTTP 401 on a freshly-minted access token: the token was rejected outright
+    // → surface as reconnect-required.
     return 'reconnect_required';
+  }
+  if (kind === 'permission') {
+    // TASK-071 — HTTP 403 is NOT a dead grant (the access token was minted from a
+    // healthy refresh). Treat it as transient/retryable so a Graph access blip on
+    // the renew request never forces a manual reconnect — matching delta polling
+    // and the email worker.
+    return 'transient';
   }
   if (kind === 'not_found' || httpStatus === 404 || httpStatus === 410) {
     return 'expired';

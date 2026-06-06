@@ -91,6 +91,14 @@ export function createPrismaDeltaPollingRepo(
         },
       });
     },
+    async resetDeltaCursor(mailboxId) {
+      // TASK-071 — clear only the stored deltaLink so the next cycle bootstraps a
+      // fresh cursor. Status and error fields are left to the normal record path.
+      await client.mailbox.update({
+        where: { id: mailboxId },
+        data: { microsoftDeltaCursor: null },
+      });
+    },
     async markReconnectRequired(mailboxId) {
       await client.mailbox.update({
         where: { id: mailboxId },

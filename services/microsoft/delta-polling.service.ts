@@ -58,6 +58,13 @@ export interface DeltaPollingMailboxRepo {
     safeMessage: string,
     occurredAt: Date,
   ): Promise<void>;
+  /**
+   * TASK-071 — clear a poisoned delta cursor so the NEXT cycle re-bootstraps from
+   * scratch instead of replaying the same rejected deltaLink. Used when a stored
+   * cursor request is forbidden (403): a fresh bootstrap is strictly better than
+   * a cursor that can no longer mint pages, and the refresh grant is healthy.
+   */
+  resetDeltaCursor(mailboxId: string): Promise<void>;
   markReconnectRequired(mailboxId: string): Promise<void>;
 }
 
@@ -113,16 +120,39 @@ interface GraphDeltaResponse {
   '@odata.deltaLink'?: string;
 }
 
-type AuthKind = 'auth' | 'transient' | 'unknown';
+// TASK-071 — `forbidden` (HTTP 403) is split out from `auth` (HTTP 401). A 403 on
+// a Graph DATA request is NOT a dead refresh grant (the access token was just
+// minted from a healthy refresh — see the runner's token port), so it must NOT
+// flip the mailbox to RECONNECT_REQUIRED the way a token-endpoint invalid_grant
+// does. Only 401 (token rejected outright) keeps the reconnect semantics.
+type AuthKind = 'auth' | 'forbidden' | 'transient' | 'unknown';
+
+/** Sanitized diagnostics pulled from a Graph error response (never tokens). */
+interface GraphErrorDiagnostics {
+  graphErrorCode?: string;
+  graphInnerErrorCode?: string;
+  graphRequestId?: string;
+}
 
 class DeltaPollingHttpError extends Error {
   readonly kind: AuthKind;
   readonly httpStatus: number;
-  constructor(kind: AuthKind, httpStatus: number, message: string) {
+  readonly graphErrorCode?: string;
+  readonly graphInnerErrorCode?: string;
+  readonly graphRequestId?: string;
+  constructor(
+    kind: AuthKind,
+    httpStatus: number,
+    message: string,
+    diagnostics: GraphErrorDiagnostics = {},
+  ) {
     super(message);
     this.name = 'DeltaPollingHttpError';
     this.kind = kind;
     this.httpStatus = httpStatus;
+    this.graphErrorCode = diagnostics.graphErrorCode;
+    this.graphInnerErrorCode = diagnostics.graphInnerErrorCode;
+    this.graphRequestId = diagnostics.graphRequestId;
   }
 }
 
@@ -161,10 +191,43 @@ function buildInitialDeltaUrl(bootstrapFromDate?: Date): string {
 }
 
 function classifyHttpStatus(status: number): AuthKind {
-  if (status === 401 || status === 403) return 'auth';
+  if (status === 401) return 'auth';
+  // TASK-071 — 403 on a data request ≠ dead grant → its own kind, never reconnect.
+  if (status === 403) return 'forbidden';
   if (status === 429) return 'transient';
   if (status >= 500 && status <= 599) return 'transient';
   return 'unknown';
+}
+
+/**
+ * TASK-071 — pull ONLY enum-like diagnostics from a Graph error response:
+ * `error.code`, `error.innerError.code`, and the `request-id` header. Never the
+ * human-readable `error.message` (it can echo the address/UPN) and never any
+ * token. Best-effort: a non-JSON or unreadable body yields partial diagnostics.
+ */
+async function readGraphErrorDiagnostics(
+  response: Response,
+): Promise<GraphErrorDiagnostics> {
+  const diagnostics: GraphErrorDiagnostics = {};
+  const requestId =
+    response.headers.get('request-id') ??
+    response.headers.get('client-request-id') ??
+    undefined;
+  if (requestId) diagnostics.graphRequestId = requestId;
+  try {
+    const body: unknown = await response.json();
+    if (isRecord(body) && isRecord(body.error)) {
+      diagnostics.graphErrorCode = readOptionalString(body.error.code);
+      if (isRecord(body.error.innerError)) {
+        diagnostics.graphInnerErrorCode = readOptionalString(
+          body.error.innerError.code,
+        );
+      }
+    }
+  } catch {
+    // Never throw while building diagnostics — the HTTP error is what matters.
+  }
+  return diagnostics;
 }
 
 async function fetchDeltaPage(
@@ -187,7 +250,13 @@ async function fetchDeltaPage(
 
   if (!response.ok) {
     const kind = classifyHttpStatus(response.status);
-    throw new DeltaPollingHttpError(kind, response.status, 'GRAPH_REQUEST_FAILED');
+    const diagnostics = await readGraphErrorDiagnostics(response);
+    throw new DeltaPollingHttpError(
+      kind,
+      response.status,
+      'GRAPH_REQUEST_FAILED',
+      diagnostics,
+    );
   }
 
   let payload: unknown;
@@ -227,7 +296,13 @@ function maskEmail(emailAddress: string): string {
 
 function safeErrorMessage(error: unknown): string {
   if (error instanceof DeltaPollingHttpError) {
-    return `${error.message} (http=${error.httpStatus})`;
+    // TASK-071 — append sanitized Graph diagnostics (enum codes + request-id) so
+    // ops can correlate with Microsoft support, without leaking any secret.
+    const parts = [`${error.message} (http=${error.httpStatus})`];
+    if (error.graphErrorCode) parts.push(`code=${error.graphErrorCode}`);
+    if (error.graphInnerErrorCode) parts.push(`inner=${error.graphInnerErrorCode}`);
+    if (error.graphRequestId) parts.push(`reqId=${error.graphRequestId}`);
+    return parts.join(' ');
   }
   if (error instanceof Error) {
     // Only the error class name — error.message may contain unexpected
@@ -429,7 +504,19 @@ export async function runDeltaPollingOnce(
     } catch (error) {
       result.failedMailboxCount += 1;
       if (error instanceof DeltaPollingHttpError && error.kind === 'auth') {
+        // HTTP 401 on the data request: the access token was rejected outright →
+        // reconnect, as before.
         await safelyMarkReconnectRequired(mailbox.id, deps.repo, logger);
+      } else if (
+        error instanceof DeltaPollingHttpError &&
+        error.kind === 'forbidden' &&
+        mailbox.microsoftDeltaCursor !== null
+      ) {
+        // TASK-071 — HTTP 403 with a STORED cursor: the refresh grant is healthy,
+        // so do NOT flag reconnect. Drop the (likely poisoned) cursor so the next
+        // cycle re-bootstraps — a fresh bootstrap is the safe self-heal. A 403
+        // during bootstrap (cursor null) has nothing to reset; it just retries.
+        await safelyResetDeltaCursor(mailbox.id, deps.repo, logger);
       }
       await safelyRecordError(
         mailbox.id,
@@ -482,6 +569,21 @@ async function safelyMarkReconnectRequired(
     await repo.markReconnectRequired(mailboxId);
   } catch (error) {
     logger.warn('Delta polling failed to mark mailbox reconnect-required', {
+      mailboxId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    });
+  }
+}
+
+async function safelyResetDeltaCursor(
+  mailboxId: string,
+  repo: DeltaPollingMailboxRepo,
+  logger: Logger,
+): Promise<void> {
+  try {
+    await repo.resetDeltaCursor(mailboxId);
+  } catch (error) {
+    logger.warn('Delta polling failed to reset delta cursor', {
       mailboxId,
       errorName: error instanceof Error ? error.name : 'UnknownError',
     });

@@ -23,6 +23,7 @@ interface FakeRepoState {
     occurredAt: Date;
   }>;
   reconnectMarked: string[];
+  cursorResets: string[];
   listImpl?: () => Promise<DeltaPollingMailbox[]>;
 }
 
@@ -35,6 +36,7 @@ function createFakeRepo(initial: DeltaPollingMailbox[]): {
     savedCursors: [],
     recordedErrors: [],
     reconnectMarked: [],
+    cursorResets: [],
   };
   const repo: DeltaPollingMailboxRepo = {
     async listActiveMicrosoftMailboxes() {
@@ -46,6 +48,9 @@ function createFakeRepo(initial: DeltaPollingMailbox[]): {
     },
     async recordDeltaError(mailboxId, message, occurredAt) {
       state.recordedErrors.push({ mailboxId, message, occurredAt });
+    },
+    async resetDeltaCursor(mailboxId) {
+      state.cursorResets.push(mailboxId);
     },
     async markReconnectRequired(mailboxId) {
       state.reconnectMarked.push(mailboxId);
@@ -500,6 +505,117 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
   });
 
+  it('TASK-071 — Graph 403 on a data request does NOT mark RECONNECT_REQUIRED', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_403',
+      emailAddress: 'forbidden@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_403: 'token-healthy' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([errorResponse(403)]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // The grant is healthy — 403 must never flip the mailbox to reconnect.
+    expect(state.reconnectMarked).toEqual([]);
+    // Still counted as a failed cycle and recorded for visibility.
+    expect(result.failedMailboxCount).toBe(1);
+    expect(state.recordedErrors).toHaveLength(1);
+    expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
+    expect(enqueueCalls).toEqual([]);
+  });
+
+  it('TASK-071 — Graph 403 with a stored cursor resets the cursor (self-heal)', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_403_cursor',
+      emailAddress: 'poison@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/poisoned-cursor',
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_403_cursor: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([errorResponse(403)]);
+
+    await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // The poisoned cursor is dropped so the next cycle bootstraps fresh; the
+    // mailbox stays ACTIVE (no reconnect).
+    expect(state.cursorResets).toEqual(['mb_403_cursor']);
+    expect(state.reconnectMarked).toEqual([]);
+  });
+
+  it('TASK-071 — Graph 403 during bootstrap (no cursor) does not reset or reconnect', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_403_bootstrap',
+      emailAddress: 'bootstrap403@example.com',
+      microsoftDeltaCursor: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_403_bootstrap: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([errorResponse(403)]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // Nothing to reset (already bootstrapping) and no reconnect; just retry next.
+    expect(state.cursorResets).toEqual([]);
+    expect(state.reconnectMarked).toEqual([]);
+    expect(result.failedMailboxCount).toBe(1);
+    expect(state.recordedErrors).toHaveLength(1);
+  });
+
+  it('TASK-071 — records sanitized Graph diagnostics (code/inner/request-id, no message)', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_diag',
+      emailAddress: 'diag@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_diag: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    // Graph-shaped error body + request-id header. error.message is intentionally
+    // sensitive-looking so we can assert it is NEVER copied into the record.
+    const graph403 = new Response(
+      JSON.stringify({
+        error: {
+          code: 'ErrorAccessDenied',
+          message: 'Access is denied for diag@example.com mailbox UPN',
+          innerError: { code: 'MailboxNotEnabledForRESTAPI' },
+        },
+      }),
+      {
+        status: 403,
+        headers: {
+          'content-type': 'application/json',
+          'request-id': 'req-abc-123',
+        },
+      },
+    );
+    const { fetch: stub } = fetchStub([graph403]);
+
+    await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    expect(state.recordedErrors).toHaveLength(1);
+    const message = state.recordedErrors[0].message;
+    expect(message).toContain('code=ErrorAccessDenied');
+    expect(message).toContain('inner=MailboxNotEnabledForRESTAPI');
+    expect(message).toContain('reqId=req-abc-123');
+    // The human-readable Graph message (which can echo the UPN/address) must
+    // never be copied into the stored error.
+    expect(message).not.toContain('Access is denied');
+    expect(message).not.toContain('UPN');
+  });
+
   it('marks mailbox RECONNECT_REQUIRED when the token error is reconnect_required', async () => {
     const mailbox: DeltaPollingMailbox = {
       id: 'mb_no_token',
@@ -655,6 +771,7 @@ describe('runDeltaPollingOnce — security contract', () => {
       },
       async saveDeltaCursor() {},
       async recordDeltaError() {},
+      async resetDeltaCursor() {},
       async markReconnectRequired() {},
     };
     const accessToken = createFakeAccessToken({});

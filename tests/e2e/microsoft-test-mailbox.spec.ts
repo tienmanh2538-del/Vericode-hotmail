@@ -329,6 +329,7 @@ function makeDeltaDeps(
     listActiveMicrosoftMailboxes: async () => [mailbox],
     saveDeltaCursor: async () => undefined,
     recordDeltaError: async () => undefined,
+    resetDeltaCursor: async () => undefined,
     markReconnectRequired: async () => undefined,
   };
 

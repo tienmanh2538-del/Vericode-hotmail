@@ -159,11 +159,15 @@ describe('classifySubscription (selection)', () => {
 });
 
 describe('classifyRenewError', () => {
-  it('maps auth/permission to reconnect_required', () => {
+  it('maps auth (401) to reconnect_required', () => {
     expect(classifyRenewError({ kind: 'auth', httpStatus: 401 })).toBe('reconnect_required');
-    expect(classifyRenewError({ kind: 'permission', httpStatus: 403 })).toBe(
-      'reconnect_required',
-    );
+  });
+
+  it('TASK-071 — maps permission (403) to transient, not reconnect_required', () => {
+    // A 403 on the renew request is a Graph access blip, not a dead grant (the
+    // access token was minted from a healthy refresh), so it must retry rather
+    // than force a manual reconnect.
+    expect(classifyRenewError({ kind: 'permission', httpStatus: 403 })).toBe('transient');
   });
 
   it('maps not_found / 404 / 410 to expired', () => {
