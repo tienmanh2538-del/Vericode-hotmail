@@ -383,7 +383,12 @@ function mapGraphErrorToResult(
   },
 ): GraphMessagePipelineResult {
   if (err instanceof GraphMailError) {
-    if (err.kind === 'auth' || err.kind === 'permission') {
+    // TASK-074 — sync with TASK-071's delta-polling 403 handling. Only a 401
+    // (`auth`, token rejected outright) is a dead grant → FAILED_RECONNECT_REQUIRED.
+    // A 403 (`permission`, forbidden DATA request with a still-valid token) is
+    // NOT a reconnect: it falls through to the neutral, retryable
+    // FAILED_GRAPH_FETCH below and never flags the mailbox RECONNECT_REQUIRED.
+    if (err.kind === 'auth') {
       return {
         ok: false,
         status: 'FAILED_RECONNECT_REQUIRED',

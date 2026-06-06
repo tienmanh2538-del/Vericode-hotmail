@@ -410,6 +410,59 @@ describe('processGraphMessageJob', () => {
     ).toBe(true);
   });
 
+  it('Case 6c — TASK-074: a 403/permission Graph error is NOT reconnect and does not flag the mailbox', async () => {
+    const harness = makeHarness({
+      graphError: new GraphMailError('permission', 'GRAPH_PERMISSION_DENIED', {
+        httpStatus: 403,
+      }),
+    });
+
+    const result = await processGraphMessageJob(makeJob(), harness.deps);
+
+    // 403 must use the neutral, retryable status — NOT FAILED_RECONNECT_REQUIRED.
+    expect(result.status).toBe('FAILED_GRAPH_FETCH');
+    expect(result.status).not.toBe('FAILED_RECONNECT_REQUIRED');
+    expect(result.reason).toBe('permission');
+    // The mailbox must NOT be flipped to RECONNECT_REQUIRED on a 403.
+    expect(harness.mailboxes.markReconnectRequiredMock).not.toHaveBeenCalled();
+    const auditCalls = harness.audit.auditMock.mock.calls.map(([input]) => input);
+    expect(
+      auditCalls.some((a) => a.action === 'MAILBOX_RECONNECT_REQUIRED'),
+    ).toBe(false);
+    expect(harness.telegramSender.sendMock).not.toHaveBeenCalled();
+    // No secret/code leakage in the result envelope.
+    expect(JSON.stringify(result)).not.toContain(VERIFICATION_CODE);
+    expect(JSON.stringify(result)).not.toContain(FAKE_ACCESS_TOKEN);
+  });
+
+  it('Case 6d — TASK-074: 429/5xx Graph errors stay transient FAILED_GRAPH_FETCH (no reconnect)', async () => {
+    const rateLimited = makeHarness({
+      graphError: new GraphMailError('rate_limited', 'GRAPH_RATE_LIMITED', {
+        httpStatus: 429,
+      }),
+    });
+    const rateResult = await processGraphMessageJob(makeJob(), rateLimited.deps);
+    expect(rateResult.status).toBe('FAILED_GRAPH_FETCH');
+    expect(rateResult.reason).toBe('rate_limited');
+    expect(
+      rateLimited.mailboxes.markReconnectRequiredMock,
+    ).not.toHaveBeenCalled();
+
+    const serverError = makeHarness({
+      graphError: new GraphMailError('temporary', 'GRAPH_TEMPORARY_ERROR', {
+        httpStatus: 503,
+      }),
+    });
+    const serverResult = await processGraphMessageJob(
+      makeJob(),
+      serverError.deps,
+    );
+    expect(serverResult.status).toBe('FAILED_GRAPH_FETCH');
+    expect(
+      serverError.mailboxes.markReconnectRequiredMock,
+    ).not.toHaveBeenCalled();
+  });
+
   it('Case 7 — returns FAILED_TELEGRAM_SEND safely when the Telegram sender throws', async () => {
     const harness = makeHarness({
       sendError: new TelegramSendError('telegram_api', 'Telegram send failed', {
