@@ -134,17 +134,27 @@ async function handleWebhookRequest(
       enqueued: enqueueResult.enqueued,
       enqueueFailed: enqueueResult.failed,
     });
-    return NextResponse.json(
-      {
-        ok: true,
-        received: result.received,
-        accepted: result.accepted.length,
-        skipped: result.skipped.length,
-        enqueued: enqueueResult.enqueued,
-        enqueueFailed: enqueueResult.failed,
-      },
-      { status: 202 },
-    );
+
+    // TASK-073 — If ANY accepted notification failed to enqueue, do NOT report
+    // success. Returning a non-2xx (503) lets Microsoft Graph redeliver the
+    // whole batch so we never silently drop a verification email. The batch is
+    // safe to redeliver: each notification carries a deterministic jobId
+    // ("microsoft-webhook:{mailboxId}:{graphMessageId}"), so already-enqueued
+    // items deduplicate at the queue level and the pipeline's ProcessedMessage
+    // unique constraint prevents a duplicate Telegram send. Skipped (e.g.
+    // invalid clientState) notifications are NOT failures and never force 503.
+    const hasEnqueueFailure = enqueueResult.failed > 0;
+    const responseBody = {
+      ok: !hasEnqueueFailure,
+      received: result.received,
+      accepted: result.accepted.length,
+      skipped: result.skipped.length,
+      enqueued: enqueueResult.enqueued,
+      enqueueFailed: enqueueResult.failed,
+    };
+    return NextResponse.json(responseBody, {
+      status: hasEnqueueFailure ? 503 : 202,
+    });
   } catch {
     logger.error('Microsoft webhook notification handling failed');
     return NextResponse.json(

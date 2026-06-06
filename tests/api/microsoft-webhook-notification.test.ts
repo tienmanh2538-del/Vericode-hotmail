@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server';
 
 import { hashClientState } from '@/services/microsoft/graph-subscription.service';
 import type { GraphSubscriptionStatus } from '@/services/microsoft/graph-subscription.service';
+import { enqueueMicrosoftGraphMessageJob } from '@/services/queue/email-queue';
 
 // Hoisted state for the mocked prisma client. The mock factory runs before any
 // `import` is evaluated, so we cannot close over a top-level `let`. Use
@@ -283,5 +284,184 @@ describe('POST /api/webhooks/microsoft/mail — notification routing', () => {
       logSpy.mockRestore();
       warnSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-073 — Webhook enqueue failure handling
+//
+// A genuine enqueue failure (Redis/queue down) must NOT be reported as success.
+// The route returns 503 so Microsoft Graph redelivers the batch; deterministic
+// jobId + ProcessedMessage dedup keep redelivery from producing duplicate sends.
+// Skipped notifications (e.g. invalid clientState) are NOT enqueue failures.
+// ---------------------------------------------------------------------------
+describe('POST /api/webhooks/microsoft/mail — TASK-073 enqueue failure', () => {
+  const SECOND_MESSAGE_ID = 'AAMkAGNiYzAxRouteSecond';
+  const SECOND_RESOURCE = `users/abc/mailFolders('Inbox')/messages/${SECOND_MESSAGE_ID}`;
+
+  it('returns 503 (not 202) when the only notification fails to enqueue', async () => {
+    seedActiveSubscription();
+    vi.mocked(enqueueMicrosoftGraphMessageJob).mockRejectedValueOnce(
+      new Error('queue unavailable'),
+    );
+
+    const request = makePostNotificationRequest({
+      value: [buildNotification()],
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(503);
+    expect(response.status).not.toBe(202);
+    const payload = (await response.json()) as {
+      ok: boolean;
+      received: number;
+      accepted: number;
+      enqueued: number;
+      enqueueFailed: number;
+    };
+    expect(payload).toMatchObject({
+      ok: false,
+      received: 1,
+      accepted: 1,
+      enqueued: 0,
+      enqueueFailed: 1,
+    });
+  });
+
+  it('returns 503 for a batch where at least one enqueue fails (partial success)', async () => {
+    seedActiveSubscription();
+    // First accepted notification fails to enqueue; the second succeeds via the
+    // default mock implementation. The whole request must still report 503.
+    vi.mocked(enqueueMicrosoftGraphMessageJob).mockRejectedValueOnce(
+      new Error('transient queue blip'),
+    );
+
+    const request = makePostNotificationRequest({
+      value: [
+        buildNotification(),
+        buildNotification({
+          resource: SECOND_RESOURCE,
+          resourceData: { id: SECOND_MESSAGE_ID },
+        }),
+      ],
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(503);
+    const payload = (await response.json()) as {
+      ok: boolean;
+      accepted: number;
+      enqueued: number;
+      enqueueFailed: number;
+    };
+    expect(payload).toMatchObject({
+      ok: false,
+      accepted: 2,
+      enqueued: 1,
+      enqueueFailed: 1,
+    });
+  });
+
+  it('still returns 202 when all accepted notifications enqueue successfully', async () => {
+    seedActiveSubscription();
+    const request = makePostNotificationRequest({
+      value: [buildNotification()],
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(202);
+    const payload = (await response.json()) as {
+      ok: boolean;
+      enqueueFailed: number;
+    };
+    expect(payload.ok).toBe(true);
+    expect(payload.enqueueFailed).toBe(0);
+  });
+
+  it('does not treat a clientState skip as an enqueue failure (stays 202, no enqueue)', async () => {
+    seedActiveSubscription();
+    const request = makePostNotificationRequest({
+      value: [buildNotification({ clientState: WRONG_CLIENT_STATE })],
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(202);
+    const payload = (await response.json()) as {
+      ok: boolean;
+      skipped: number;
+      enqueued: number;
+      enqueueFailed: number;
+    };
+    expect(payload).toMatchObject({
+      ok: true,
+      skipped: 1,
+      enqueued: 0,
+      enqueueFailed: 0,
+    });
+    expect(enqueueCalls.list).toHaveLength(0);
+  });
+
+  it('validationToken verification still returns 200 text/plain without enqueue', async () => {
+    seedActiveSubscription();
+    // Validation short-circuits before any enqueue, so it never depends on the
+    // queue/Redis being available. We assert enqueue is not called at all.
+    const request = makePostNotificationRequest(
+      { value: [buildNotification()] },
+      'validationToken=validation-123',
+    );
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/plain; charset=utf-8');
+    expect(await response.text()).toBe('validation-123');
+    expect(enqueueCalls.list).toHaveLength(0);
+  });
+
+  it('enqueues each accepted notification exactly once (no manual retry loop in route)', async () => {
+    seedActiveSubscription();
+    // Reset only the call history (not the implementation) so the count below
+    // reflects just this request — the suite has no global clearMocks.
+    vi.mocked(enqueueMicrosoftGraphMessageJob).mockClear();
+    const request = makePostNotificationRequest({
+      value: [
+        buildNotification(),
+        buildNotification({
+          resource: SECOND_RESOURCE,
+          resourceData: { id: SECOND_MESSAGE_ID },
+        }),
+      ],
+    });
+
+    await POST(request);
+
+    // Two accepted notifications → exactly two enqueue calls. Redelivery is
+    // Microsoft's job, not a route-level retry loop.
+    expect(enqueueCalls.list).toHaveLength(2);
+    expect(vi.mocked(enqueueMicrosoftGraphMessageJob)).toHaveBeenCalledTimes(2);
+  });
+
+  it('503 failure response body does not leak clientState or secrets', async () => {
+    seedActiveSubscription();
+    vi.mocked(enqueueMicrosoftGraphMessageJob).mockRejectedValueOnce(
+      new Error('queue unavailable'),
+    );
+
+    const request = makePostNotificationRequest({
+      value: [buildNotification()],
+    });
+
+    const response = await POST(request);
+    const text = await response.text();
+
+    expect(response.status).toBe(503);
+    expect(text).not.toContain(CLIENT_STATE);
+    // Body is a compact count envelope only — assert it carries no payload keys.
+    expect(text).not.toContain('clientState');
+    expect(text).not.toContain('resource');
   });
 });
