@@ -34,6 +34,28 @@ const DEFAULT_MAX_PAGES_PER_MAILBOX = 10;
 // ($filter=receivedDateTime ge {ts}, itself capped at 5,000 messages).
 const DEFAULT_BOOTSTRAP_LOOKBACK_HOURS = 24;
 const MS_PER_HOUR = 60 * 60 * 1000;
+const MS_PER_MINUTE = 60 * 1000;
+
+// TASK-075 — persistent delta 403 (forbidden) backoff.
+//
+// A 403 on a Graph DATA request is NOT a dead refresh grant (TASK-071), so it
+// must never flip the mailbox to RECONNECT_REQUIRED. But an ACCOUNT/ENDPOINT
+// -level 403 (e.g. MailboxNotEnabledForRESTAPI, ErrorAccessDenied) keeps
+// returning 403 every cycle even after the TASK-071 cursor self-heal resets the
+// cursor and re-bootstraps. Without a brake, the poller hammers Graph (and the
+// token endpoint) full-speed forever and stays silent.
+//
+// Backoff model (per mailbox, persisted in DB so it survives a restart):
+//   - Each consecutive forbidden cycle increments `deltaForbiddenCount`.
+//   - Below the threshold, we stay full-speed so the TASK-071 cursor self-heal
+//     still has a fast chance to recover a merely-poisoned cursor.
+//   - At/above the threshold we set an exponential cooldown (capped). While a
+//     mailbox is in cooldown the next cycle SKIPS it entirely — no token fetch,
+//     no Graph call — and raises one safe admin alert.
+//   - Any successful poll clears the count + cooldown + stale error metadata.
+const DEFAULT_FORBIDDEN_BACKOFF_THRESHOLD = 3;
+const FORBIDDEN_BACKOFF_BASE_MS = 5 * MS_PER_MINUTE;
+const FORBIDDEN_BACKOFF_MAX_MS = 60 * MS_PER_MINUTE;
 
 // ---------------------------------------------------------------------------
 // Public types & ports
@@ -43,6 +65,10 @@ export interface DeltaPollingMailbox {
   id: string;
   emailAddress: string;
   microsoftDeltaCursor: string | null;
+  // TASK-075 — persistent forbidden backoff state. Optional so callers/tests
+  // built before TASK-075 keep compiling; absent is treated as "no backoff".
+  deltaForbiddenCount?: number;
+  deltaForbiddenCooldownUntil?: Date | null;
 }
 
 /** Persistence surface — supplied by a Prisma-backed adapter in production. */
@@ -66,6 +92,25 @@ export interface DeltaPollingMailboxRepo {
    */
   resetDeltaCursor(mailboxId: string): Promise<void>;
   markReconnectRequired(mailboxId: string): Promise<void>;
+  /**
+   * TASK-075 — persist the per-mailbox persistent-403 backoff state (consecutive
+   * forbidden count + optional cooldown) together with the sanitized error
+   * metadata in ONE write. `cooldownUntil = null` means "counting, but not yet
+   * cooling down". Survives a worker restart.
+   */
+  recordForbiddenBackoff(
+    mailboxId: string,
+    count: number,
+    cooldownUntil: Date | null,
+    occurredAt: Date,
+    safeMessage: string,
+  ): Promise<void>;
+  /**
+   * TASK-075/080 — clear the forbidden backoff state (count → 0, cooldown → null)
+   * AND the now-stale delta error metadata after a successful poll / self-heal,
+   * so the dashboard stops showing a resolved error.
+   */
+  clearForbiddenBackoff(mailboxId: string): Promise<void>;
 }
 
 /** Access-token surface. Implementations decrypt + exchange the refresh token. */
@@ -82,10 +127,29 @@ export interface DeltaPollingEnqueuePort {
   }): Promise<void>;
 }
 
+/**
+ * TASK-075 — optional admin alert surface. Wired in production to the TASK-035
+ * admin alert (Telegram) channel; left undefined in unit tests that do not
+ * assert on alerting. The service calls it ONLY when a mailbox crosses the
+ * persistent-403 threshold, and never lets an alert failure break the cycle.
+ */
+export interface DeltaPollingAlertPort {
+  raisePersistentForbidden(input: {
+    mailboxId: string;
+    emailAddressMasked: string;
+    consecutiveForbiddenCount: number;
+    cooldownUntil: Date;
+    /** Sanitized Graph diagnostics (enum codes + request-id) — never a secret. */
+    safeDiagnostics: string;
+  }): Promise<void>;
+}
+
 export interface DeltaPollingDeps {
   repo: DeltaPollingMailboxRepo;
   accessToken: DeltaPollingAccessTokenPort;
   enqueue: DeltaPollingEnqueuePort;
+  /** TASK-075 — optional admin alert port for persistent 403 escalation. */
+  alert?: DeltaPollingAlertPort;
   fetchImpl?: typeof fetch;
   logger?: Logger;
   now?: () => Date;
@@ -96,6 +160,12 @@ export interface DeltaPollingDeps {
    * the initial delta request only. Ignored once a deltaLink cursor exists.
    */
   bootstrapLookbackHours?: number;
+  /**
+   * TASK-075 — consecutive forbidden (403) cycles a mailbox may accrue before a
+   * cooldown + alert kicks in. Defaults to {@link DEFAULT_FORBIDDEN_BACKOFF_THRESHOLD}.
+   * Injectable so tests can exercise escalation without running many cycles.
+   */
+  forbiddenBackoffThreshold?: number;
 }
 
 export interface DeltaPollingRunResult {
@@ -103,6 +173,9 @@ export interface DeltaPollingRunResult {
   bootstrappedMailboxCount: number;
   enqueuedMessageCount: number;
   failedMailboxCount: number;
+  // TASK-075 — mailboxes skipped this cycle because they are inside a persistent
+  // -403 cooldown window. Not counted as failures (no Graph call was attempted).
+  cooldownSkippedMailboxCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +270,18 @@ function classifyHttpStatus(status: number): AuthKind {
   if (status === 429) return 'transient';
   if (status >= 500 && status <= 599) return 'transient';
   return 'unknown';
+}
+
+/**
+ * TASK-075 — exponential cooldown (ms) for a persistent forbidden streak, capped.
+ * The first `threshold - 1` forbidden cycles get no cooldown (count below
+ * threshold); the threshold-th cycle gets the base window, then it doubles per
+ * additional consecutive forbidden cycle up to the cap.
+ */
+function forbiddenBackoffMs(count: number, threshold: number): number {
+  const steps = Math.max(0, count - threshold);
+  const ms = FORBIDDEN_BACKOFF_BASE_MS * 2 ** steps;
+  return Math.min(ms, FORBIDDEN_BACKOFF_MAX_MS);
 }
 
 /**
@@ -415,12 +500,18 @@ export async function runDeltaPollingOnce(
     deps.bootstrapLookbackHours > 0
       ? deps.bootstrapLookbackHours
       : DEFAULT_BOOTSTRAP_LOOKBACK_HOURS;
+  const forbiddenBackoffThreshold =
+    typeof deps.forbiddenBackoffThreshold === 'number' &&
+    deps.forbiddenBackoffThreshold > 0
+      ? Math.floor(deps.forbiddenBackoffThreshold)
+      : DEFAULT_FORBIDDEN_BACKOFF_THRESHOLD;
 
   const result: DeltaPollingRunResult = {
     checkedMailboxCount: 0,
     bootstrappedMailboxCount: 0,
     enqueuedMessageCount: 0,
     failedMailboxCount: 0,
+    cooldownSkippedMailboxCount: 0,
   };
 
   let mailboxes: DeltaPollingMailbox[];
@@ -442,6 +533,20 @@ export async function runDeltaPollingOnce(
   for (const mailbox of mailboxes) {
     result.checkedMailboxCount += 1;
     const startedAt = now();
+
+    // TASK-075 — persistent-403 cooldown: skip this mailbox entirely while it is
+    // inside the backoff window. No token fetch, no Graph call, no failure count
+    // — the cycle just moves on so a single bad mailbox cannot waste the run.
+    const cooldownUntil = mailbox.deltaForbiddenCooldownUntil ?? null;
+    if (cooldownUntil !== null && cooldownUntil.getTime() > startedAt.getTime()) {
+      result.cooldownSkippedMailboxCount += 1;
+      logger.info('Delta polling skipping mailbox in forbidden cooldown', {
+        mailboxId: mailbox.id,
+        emailAddressMasked: maskEmail(mailbox.emailAddress),
+      });
+      continue;
+    }
+
     try {
       let accessToken: string;
       try {
@@ -494,6 +599,14 @@ export async function runDeltaPollingOnce(
         }
       }
 
+      // TASK-075/080 — a successful poll means any prior forbidden streak has
+      // self-healed. Clear the backoff counter, the cooldown, and the now-stale
+      // delta error metadata so the dashboard stops showing a resolved error.
+      // Only write when there was state to clear (recovery is the rare path).
+      if (hasForbiddenState(mailbox)) {
+        await safelyClearForbiddenBackoff(mailbox.id, deps.repo, logger);
+      }
+
       logger.info('Delta polling cycle completed for mailbox', {
         mailboxId: mailbox.id,
         emailAddressMasked: maskEmail(mailbox.emailAddress),
@@ -507,24 +620,30 @@ export async function runDeltaPollingOnce(
         // HTTP 401 on the data request: the access token was rejected outright →
         // reconnect, as before.
         await safelyMarkReconnectRequired(mailbox.id, deps.repo, logger);
-      } else if (
-        error instanceof DeltaPollingHttpError &&
-        error.kind === 'forbidden' &&
-        mailbox.microsoftDeltaCursor !== null
-      ) {
-        // TASK-071 — HTTP 403 with a STORED cursor: the refresh grant is healthy,
-        // so do NOT flag reconnect. Drop the (likely poisoned) cursor so the next
-        // cycle re-bootstraps — a fresh bootstrap is the safe self-heal. A 403
-        // during bootstrap (cursor null) has nothing to reset; it just retries.
-        await safelyResetDeltaCursor(mailbox.id, deps.repo, logger);
+        await safelyRecordError(
+          mailbox.id,
+          safeErrorMessage(error),
+          startedAt,
+          deps.repo,
+          logger,
+        );
+      } else if (error instanceof DeltaPollingHttpError && error.kind === 'forbidden') {
+        // TASK-075 — persistent 403 backoff (preserves TASK-071 self-heal).
+        await handlePersistentForbidden(mailbox, error, startedAt, {
+          repo: deps.repo,
+          alert: deps.alert,
+          logger,
+          threshold: forbiddenBackoffThreshold,
+        });
+      } else {
+        await safelyRecordError(
+          mailbox.id,
+          safeErrorMessage(error),
+          startedAt,
+          deps.repo,
+          logger,
+        );
       }
-      await safelyRecordError(
-        mailbox.id,
-        safeErrorMessage(error),
-        startedAt,
-        deps.repo,
-        logger,
-      );
       logger.warn('Delta polling failed for mailbox', {
         mailboxId: mailbox.id,
         emailAddressMasked: maskEmail(mailbox.emailAddress),
@@ -538,9 +657,79 @@ export async function runDeltaPollingOnce(
     bootstrappedMailboxCount: result.bootstrappedMailboxCount,
     enqueuedMessageCount: result.enqueuedMessageCount,
     failedMailboxCount: result.failedMailboxCount,
+    cooldownSkippedMailboxCount: result.cooldownSkippedMailboxCount,
   });
 
   return result;
+}
+
+/** TASK-075 — whether a mailbox currently carries any forbidden backoff state. */
+function hasForbiddenState(mailbox: DeltaPollingMailbox): boolean {
+  return (
+    (mailbox.deltaForbiddenCount ?? 0) > 0 ||
+    (mailbox.deltaForbiddenCooldownUntil ?? null) !== null
+  );
+}
+
+/**
+ * TASK-075 — handle a 403 (forbidden) on a Graph data request. Preserves the
+ * TASK-071 cursor self-heal, increments the persistent forbidden counter, and —
+ * once the streak crosses the threshold — sets an escalating cooldown and raises
+ * a single safe admin alert. NEVER flips the mailbox to RECONNECT_REQUIRED.
+ */
+async function handlePersistentForbidden(
+  mailbox: DeltaPollingMailbox,
+  error: DeltaPollingHttpError,
+  occurredAt: Date,
+  deps: {
+    repo: DeltaPollingMailboxRepo;
+    alert?: DeltaPollingAlertPort;
+    logger: Logger;
+    threshold: number;
+  },
+): Promise<void> {
+  // TASK-071 self-heal: a 403 against a STORED cursor drops the (likely poisoned)
+  // cursor so the next cycle re-bootstraps. A 403 during bootstrap (cursor null)
+  // has nothing to reset; it just retries (subject to the backoff below).
+  if (mailbox.microsoftDeltaCursor !== null) {
+    await safelyResetDeltaCursor(mailbox.id, deps.repo, deps.logger);
+  }
+
+  const nextCount = (mailbox.deltaForbiddenCount ?? 0) + 1;
+  // Below the threshold we stay full-speed so the cursor self-heal has a fast
+  // chance to recover a merely-poisoned cursor. At/above it, cool down.
+  const cooldownUntil =
+    nextCount >= deps.threshold
+      ? new Date(
+          occurredAt.getTime() + forbiddenBackoffMs(nextCount, deps.threshold),
+        )
+      : null;
+
+  await safelyRecordForbiddenBackoff(
+    mailbox.id,
+    nextCount,
+    cooldownUntil,
+    occurredAt,
+    safeErrorMessage(error),
+    deps.repo,
+    deps.logger,
+  );
+
+  if (cooldownUntil !== null && deps.alert) {
+    // Over threshold: page OWNER/ADMIN once per cooldown window (the skip above
+    // naturally rate-limits re-alerting). Best-effort and secret-free.
+    await safelyRaisePersistentForbiddenAlert(
+      deps.alert,
+      {
+        mailboxId: mailbox.id,
+        emailAddressMasked: maskEmail(mailbox.emailAddress),
+        consecutiveForbiddenCount: nextCount,
+        cooldownUntil,
+        safeDiagnostics: safeErrorMessage(error),
+      },
+      deps.logger,
+    );
+  }
 }
 
 async function safelyRecordError(
@@ -590,6 +779,68 @@ async function safelyResetDeltaCursor(
   }
 }
 
+async function safelyRecordForbiddenBackoff(
+  mailboxId: string,
+  count: number,
+  cooldownUntil: Date | null,
+  occurredAt: Date,
+  safeMessage: string,
+  repo: DeltaPollingMailboxRepo,
+  logger: Logger,
+): Promise<void> {
+  try {
+    await repo.recordForbiddenBackoff(
+      mailboxId,
+      count,
+      cooldownUntil,
+      occurredAt,
+      safeMessage,
+    );
+  } catch (error) {
+    logger.warn('Delta polling failed to record forbidden backoff', {
+      mailboxId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    });
+  }
+}
+
+async function safelyClearForbiddenBackoff(
+  mailboxId: string,
+  repo: DeltaPollingMailboxRepo,
+  logger: Logger,
+): Promise<void> {
+  try {
+    await repo.clearForbiddenBackoff(mailboxId);
+  } catch (error) {
+    logger.warn('Delta polling failed to clear forbidden backoff', {
+      mailboxId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    });
+  }
+}
+
+async function safelyRaisePersistentForbiddenAlert(
+  alert: DeltaPollingAlertPort,
+  input: {
+    mailboxId: string;
+    emailAddressMasked: string;
+    consecutiveForbiddenCount: number;
+    cooldownUntil: Date;
+    safeDiagnostics: string;
+  },
+  logger: Logger,
+): Promise<void> {
+  try {
+    await alert.raisePersistentForbidden(input);
+  } catch (error) {
+    // Alerting must never break the poll cycle (and must not recurse).
+    logger.warn('Delta polling failed to raise persistent-forbidden alert', {
+      mailboxId: input.mailboxId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Test-facing internals
 // ---------------------------------------------------------------------------
@@ -599,6 +850,10 @@ export const __internal = {
   INBOX_DELTA_PATH,
   DEFAULT_MAX_PAGES_PER_MAILBOX,
   DEFAULT_BOOTSTRAP_LOOKBACK_HOURS,
+  DEFAULT_FORBIDDEN_BACKOFF_THRESHOLD,
+  FORBIDDEN_BACKOFF_BASE_MS,
+  FORBIDDEN_BACKOFF_MAX_MS,
+  forbiddenBackoffMs,
   buildInitialDeltaUrl,
   isValidMessageItem,
   maskEmail,

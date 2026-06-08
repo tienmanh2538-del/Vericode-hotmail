@@ -331,6 +331,8 @@ function makeDeltaDeps(
     recordDeltaError: async () => undefined,
     resetDeltaCursor: async () => undefined,
     markReconnectRequired: async () => undefined,
+    recordForbiddenBackoff: async () => undefined,
+    clearForbiddenBackoff: async () => undefined,
   };
 
   const accessToken: DeltaPollingDeps['accessToken'] = {

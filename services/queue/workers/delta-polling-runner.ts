@@ -16,6 +16,7 @@ import {
 import {
   runDeltaPollingOnce,
   type DeltaPollingAccessTokenPort,
+  type DeltaPollingAlertPort,
   type DeltaPollingDeps,
   type DeltaPollingEnqueuePort,
   type DeltaPollingMailbox,
@@ -23,6 +24,7 @@ import {
   type DeltaPollingRunResult,
 } from '@/services/microsoft/delta-polling.service';
 import { enqueueDeltaPollingMessageJob } from '@/services/queue/delta-polling-queue';
+import { sendAdminAlert } from '@/services/alerts/alert.service';
 
 const MAILBOX_STATUS_ACTIVE = 'ACTIVE';
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
@@ -36,6 +38,9 @@ interface MailboxDeltaSlice {
   id: string;
   emailAddress: string;
   microsoftDeltaCursor: string | null;
+  // TASK-075 — persistent forbidden backoff state.
+  deltaForbiddenCount: number;
+  deltaForbiddenCooldownUntil: Date | null;
 }
 
 interface MailboxDeltaPrismaClient {
@@ -61,6 +66,8 @@ export function createPrismaDeltaPollingRepo(
           id: true,
           emailAddress: true,
           microsoftDeltaCursor: true,
+          deltaForbiddenCount: true,
+          deltaForbiddenCooldownUntil: true,
         },
         orderBy: { createdAt: 'asc' },
       });
@@ -68,6 +75,8 @@ export function createPrismaDeltaPollingRepo(
         id: row.id,
         emailAddress: row.emailAddress,
         microsoftDeltaCursor: row.microsoftDeltaCursor ?? null,
+        deltaForbiddenCount: row.deltaForbiddenCount ?? 0,
+        deltaForbiddenCooldownUntil: row.deltaForbiddenCooldownUntil ?? null,
       }));
     },
     async saveDeltaCursor(mailboxId, cursorUrl, polledAt) {
@@ -103,6 +112,40 @@ export function createPrismaDeltaPollingRepo(
       await client.mailbox.update({
         where: { id: mailboxId },
         data: { status: MAILBOX_STATUS_RECONNECT_REQUIRED },
+      });
+    },
+    async recordForbiddenBackoff(
+      mailboxId,
+      count,
+      cooldownUntil,
+      occurredAt,
+      safeMessage,
+    ) {
+      // TASK-075 — persist the forbidden streak + cooldown alongside the error
+      // metadata in one write. Status is intentionally NOT touched (a 403 is not
+      // a dead grant); the cooldown alone throttles the next cycle.
+      await client.mailbox.update({
+        where: { id: mailboxId },
+        data: {
+          deltaForbiddenCount: count,
+          deltaForbiddenCooldownUntil: cooldownUntil,
+          deltaLastPolledAt: occurredAt,
+          deltaLastErrorAt: occurredAt,
+          deltaLastErrorMessage: truncateForDb(safeMessage),
+        },
+      });
+    },
+    async clearForbiddenBackoff(mailboxId) {
+      // TASK-075/080 — a successful poll resolved the streak: reset the counter +
+      // cooldown and clear the now-stale delta error metadata.
+      await client.mailbox.update({
+        where: { id: mailboxId },
+        data: {
+          deltaForbiddenCount: 0,
+          deltaForbiddenCooldownUntil: null,
+          deltaLastErrorAt: null,
+          deltaLastErrorMessage: null,
+        },
       });
     },
   };
@@ -199,6 +242,31 @@ export const prismaDeltaPollingEnqueuePort: DeltaPollingEnqueuePort = {
   },
 };
 
+// TASK-075 — admin alert port for persistent 403 escalation. Routes through the
+// existing TASK-035 admin alert channel (Telegram), which is configured for
+// OWNER/ADMIN and self-skips when no admin channel/bot token is set. Only safe,
+// already-masked fields are passed; the alert sanitizer is a second line of
+// defence. Reuses the `DELTA_POLLING_FAILED` alert type to avoid widening the
+// alert taxonomy for this single escalation.
+export const adminAlertDeltaPollingAlertPort: DeltaPollingAlertPort = {
+  async raisePersistentForbidden(input) {
+    await sendAdminAlert({
+      type: 'DELTA_POLLING_FAILED',
+      severity: 'WARNING',
+      title: 'Delta polling: persistent 403 (forbidden) for a mailbox',
+      context: {
+        source: 'delta-polling',
+        reason: 'persistent_forbidden',
+        mailboxId: input.mailboxId,
+        mailbox: input.emailAddressMasked,
+        consecutiveForbidden: input.consecutiveForbiddenCount,
+        cooldownUntil: input.cooldownUntil.toISOString(),
+        diagnostics: input.safeDiagnostics,
+      },
+    });
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Default dependency wiring
 // ---------------------------------------------------------------------------
@@ -211,12 +279,14 @@ export function buildDefaultDeltaPollingDeps(
     repo: overrides.repo ?? createPrismaDeltaPollingRepo(),
     accessToken: overrides.accessToken ?? createPrismaAccessTokenPort(),
     enqueue: overrides.enqueue ?? prismaDeltaPollingEnqueuePort,
+    alert: overrides.alert ?? adminAlertDeltaPollingAlertPort,
     fetchImpl: overrides.fetchImpl,
     logger: overrides.logger,
     now: overrides.now,
     maxPagesPerMailbox: overrides.maxPagesPerMailbox ?? env.maxPagesPerMailbox,
     bootstrapLookbackHours:
       overrides.bootstrapLookbackHours ?? env.bootstrapLookbackHours,
+    forbiddenBackoffThreshold: overrides.forbiddenBackoffThreshold,
   };
 }
 
@@ -269,6 +339,7 @@ export function startDeltaPollingScheduler(
         bootstrappedMailboxCount: 0,
         enqueuedMessageCount: 0,
         failedMailboxCount: 0,
+        cooldownSkippedMailboxCount: 0,
       };
     });
     try {

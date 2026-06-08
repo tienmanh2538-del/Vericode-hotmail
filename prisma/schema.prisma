@@ -124,6 +124,16 @@ model Mailbox {
   deltaLastPolledAt     DateTime?
   deltaLastErrorAt      DateTime?
   deltaLastErrorMessage String?
+  // TASK-075 — persistent delta 403 (forbidden) backoff. `deltaForbiddenCount`
+  // is the number of CONSECUTIVE forbidden poll cycles for this mailbox; it is
+  // reset to 0 on the next successful poll / self-heal. Once the count crosses
+  // the backoff threshold, `deltaForbiddenCooldownUntil` is set so the poller
+  // skips this mailbox (no Graph call) until that time, instead of hammering an
+  // account/endpoint-level 403 every cycle. Persisted (not in-memory) so the
+  // backoff survives a worker restart. Never used to flip mailbox status — a 403
+  // is not a dead grant (see TASK-071); 401/auth still drives RECONNECT_REQUIRED.
+  deltaForbiddenCount         Int       @default(0)
+  deltaForbiddenCooldownUntil DateTime?
   createdById           String?
   createdBy             User?           @relation("MailboxCreatedBy", fields: [createdById], references: [id])
   createdAt             DateTime        @default(now())

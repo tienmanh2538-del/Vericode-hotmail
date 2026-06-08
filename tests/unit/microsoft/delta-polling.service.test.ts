@@ -4,6 +4,7 @@ import {
   runDeltaPollingOnce,
   __internal,
   type DeltaPollingAccessTokenPort,
+  type DeltaPollingAlertPort,
   type DeltaPollingDeps,
   type DeltaPollingEnqueuePort,
   type DeltaPollingMailbox,
@@ -13,6 +14,14 @@ import {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+interface ForbiddenBackoffCall {
+  mailboxId: string;
+  count: number;
+  cooldownUntil: Date | null;
+  occurredAt: Date;
+  message: string;
+}
 
 interface FakeRepoState {
   mailboxes: DeltaPollingMailbox[];
@@ -24,6 +33,9 @@ interface FakeRepoState {
   }>;
   reconnectMarked: string[];
   cursorResets: string[];
+  // TASK-075 — persistent forbidden backoff tracking.
+  forbiddenBackoffs: ForbiddenBackoffCall[];
+  forbiddenClears: string[];
   listImpl?: () => Promise<DeltaPollingMailbox[]>;
 }
 
@@ -37,6 +49,8 @@ function createFakeRepo(initial: DeltaPollingMailbox[]): {
     recordedErrors: [],
     reconnectMarked: [],
     cursorResets: [],
+    forbiddenBackoffs: [],
+    forbiddenClears: [],
   };
   const repo: DeltaPollingMailboxRepo = {
     async listActiveMicrosoftMailboxes() {
@@ -54,6 +68,18 @@ function createFakeRepo(initial: DeltaPollingMailbox[]): {
     },
     async markReconnectRequired(mailboxId) {
       state.reconnectMarked.push(mailboxId);
+    },
+    async recordForbiddenBackoff(mailboxId, count, cooldownUntil, occurredAt, message) {
+      state.forbiddenBackoffs.push({
+        mailboxId,
+        count,
+        cooldownUntil,
+        occurredAt,
+        message,
+      });
+    },
+    async clearForbiddenBackoff(mailboxId) {
+      state.forbiddenClears.push(mailboxId);
     },
   };
   return { repo, state };
@@ -85,6 +111,32 @@ function createFakeEnqueue(): {
   }> = [];
   const port: DeltaPollingEnqueuePort = {
     async enqueueMessage(input) {
+      calls.push({ ...input });
+    },
+  };
+  return { port, calls };
+}
+
+// TASK-075 — capture admin alert escalations without sending anything real.
+function createFakeAlert(): {
+  port: DeltaPollingAlertPort;
+  calls: Array<{
+    mailboxId: string;
+    emailAddressMasked: string;
+    consecutiveForbiddenCount: number;
+    cooldownUntil: Date;
+    safeDiagnostics: string;
+  }>;
+} {
+  const calls: Array<{
+    mailboxId: string;
+    emailAddressMasked: string;
+    consecutiveForbiddenCount: number;
+    cooldownUntil: Date;
+    safeDiagnostics: string;
+  }> = [];
+  const port: DeltaPollingAlertPort = {
+    async raisePersistentForbidden(input) {
       calls.push({ ...input });
     },
   };
@@ -154,11 +206,13 @@ function buildDeps(overrides: Partial<DeltaPollingDeps>): DeltaPollingDeps {
     repo: overrides.repo,
     accessToken: overrides.accessToken,
     enqueue: overrides.enqueue,
+    alert: overrides.alert,
     fetchImpl: overrides.fetchImpl,
     logger: overrides.logger ?? silentLogger(),
     now: overrides.now ?? fixedNow('2026-05-29T12:00:00.000Z'),
     maxPagesPerMailbox: overrides.maxPagesPerMailbox,
     bootstrapLookbackHours: overrides.bootstrapLookbackHours,
+    forbiddenBackoffThreshold: overrides.forbiddenBackoffThreshold,
   };
 }
 
@@ -503,6 +557,8 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     expect(state.reconnectMarked).toEqual(['mb_auth_fail']);
     expect(state.recordedErrors).toHaveLength(1);
     expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
+    // TASK-075 — a 401 is an auth failure, NOT a forbidden backoff event.
+    expect(state.forbiddenBackoffs).toEqual([]);
   });
 
   it('TASK-071 — Graph 403 on a data request does NOT mark RECONNECT_REQUIRED', async () => {
@@ -522,10 +578,12 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
 
     // The grant is healthy — 403 must never flip the mailbox to reconnect.
     expect(state.reconnectMarked).toEqual([]);
-    // Still counted as a failed cycle and recorded for visibility.
+    // Still counted as a failed cycle and recorded for visibility. TASK-075: a
+    // 403 is recorded via the dedicated forbidden-backoff path (not recordDeltaError).
     expect(result.failedMailboxCount).toBe(1);
-    expect(state.recordedErrors).toHaveLength(1);
-    expect(state.recordedErrors[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
+    expect(state.recordedErrors).toEqual([]);
+    expect(state.forbiddenBackoffs).toHaveLength(1);
+    expect(state.forbiddenBackoffs[0].message).toMatch(/GRAPH_REQUEST_FAILED/);
     expect(enqueueCalls).toEqual([]);
   });
 
@@ -569,7 +627,11 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
     expect(state.cursorResets).toEqual([]);
     expect(state.reconnectMarked).toEqual([]);
     expect(result.failedMailboxCount).toBe(1);
-    expect(state.recordedErrors).toHaveLength(1);
+    // TASK-075 — the first forbidden cycle increments the counter but (default
+    // threshold 3) sets no cooldown yet, so the self-heal still gets fast retries.
+    expect(state.forbiddenBackoffs).toHaveLength(1);
+    expect(state.forbiddenBackoffs[0].count).toBe(1);
+    expect(state.forbiddenBackoffs[0].cooldownUntil).toBeNull();
   });
 
   it('TASK-071 — records sanitized Graph diagnostics (code/inner/request-id, no message)', async () => {
@@ -605,8 +667,9 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
       buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
     );
 
-    expect(state.recordedErrors).toHaveLength(1);
-    const message = state.recordedErrors[0].message;
+    // TASK-075 — diagnostics are persisted via the forbidden-backoff record.
+    expect(state.forbiddenBackoffs).toHaveLength(1);
+    const message = state.forbiddenBackoffs[0].message;
     expect(message).toContain('code=ErrorAccessDenied');
     expect(message).toContain('inner=MailboxNotEnabledForRESTAPI');
     expect(message).toContain('reqId=req-abc-123');
@@ -728,6 +791,262 @@ describe('runDeltaPollingOnce — isolation & errors', () => {
   });
 });
 
+describe('runDeltaPollingOnce — persistent 403 backoff (TASK-075)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('escalates to a per-mailbox cooldown once the forbidden streak crosses the threshold (no reconnect)', async () => {
+    // Cursor already null (a prior cycle self-healed it) and the streak is at
+    // threshold - 1, so this 403 is the one that crosses into cooldown.
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_persist',
+      emailAddress: 'persist@example.com',
+      microsoftDeltaCursor: null,
+      deltaForbiddenCount: 2,
+      deltaForbiddenCooldownUntil: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_persist: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([errorResponse(403)]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        // Default threshold is 3; count goes 2 → 3 which hits it.
+        now: fixedNow('2026-05-29T12:00:00.000Z'),
+      }),
+    );
+
+    // Never reconnect on a 403 — the grant is healthy.
+    expect(state.reconnectMarked).toEqual([]);
+    expect(result.failedMailboxCount).toBe(1);
+    // Persistent count incremented and a cooldown window was set for THIS mailbox.
+    expect(state.forbiddenBackoffs).toHaveLength(1);
+    expect(state.forbiddenBackoffs[0].count).toBe(3);
+    const cooldownUntil = state.forbiddenBackoffs[0].cooldownUntil;
+    expect(cooldownUntil).toBeInstanceOf(Date);
+    expect(cooldownUntil!.getTime()).toBeGreaterThan(
+      new Date('2026-05-29T12:00:00.000Z').getTime(),
+    );
+  });
+
+  it('skips a mailbox that is inside its cooldown window (no Graph call, not a failure)', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_cooling',
+      emailAddress: 'cooling@example.com',
+      microsoftDeltaCursor: null,
+      deltaForbiddenCount: 4,
+      // Cooldown ends 10 minutes after "now" → still cooling down.
+      deltaForbiddenCooldownUntil: new Date('2026-05-29T12:10:00.000Z'),
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    // If the token port is ever consulted it throws — proves we skip BEFORE it.
+    const accessToken = createFakeAccessToken({});
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub, calls: fetchCalls } = fetchStub([]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        now: fixedNow('2026-05-29T12:00:00.000Z'),
+      }),
+    );
+
+    // The mailbox was counted as checked but skipped — no Graph call, no token
+    // fetch, no enqueue, and crucially NOT counted as a failure.
+    expect(result.checkedMailboxCount).toBe(1);
+    expect(result.cooldownSkippedMailboxCount).toBe(1);
+    expect(result.failedMailboxCount).toBe(0);
+    expect(fetchCalls).toEqual([]);
+    expect(enqueueCalls).toEqual([]);
+    expect(state.forbiddenBackoffs).toEqual([]);
+    expect(state.reconnectMarked).toEqual([]);
+  });
+
+  it('polls normally once the cooldown window has elapsed', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_expired',
+      emailAddress: 'expired@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+      deltaForbiddenCount: 3,
+      // Cooldown already elapsed before "now".
+      deltaForbiddenCooldownUntil: new Date('2026-05-29T11:50:00.000Z'),
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_expired: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { fetch: stub, calls: fetchCalls } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'fresh-1' }],
+        '@odata.deltaLink': 'https://graph.example.com/delta-fresh',
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        fetchImpl: stub,
+        now: fixedNow('2026-05-29T12:00:00.000Z'),
+      }),
+    );
+
+    // Not skipped: the cooldown elapsed, so it polled and recovered.
+    expect(result.cooldownSkippedMailboxCount).toBe(0);
+    expect(fetchCalls).toHaveLength(1);
+    // Success → the backoff state is cleared.
+    expect(state.forbiddenClears).toEqual(['mb_expired']);
+  });
+
+  it('raises a safe admin alert when the 403 crosses the threshold (no secrets)', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_alert',
+      emailAddress: 'alertme@example.com',
+      microsoftDeltaCursor: null,
+      deltaForbiddenCount: 0,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_alert: 'opaque-access-token-zzz' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { port: alert, calls: alertCalls } = createFakeAlert();
+    // Graph 403 with a sensitive-looking body to prove the alert never echoes it.
+    const graph403 = new Response(
+      JSON.stringify({
+        error: {
+          code: 'ErrorAccessDenied',
+          message: 'Access is denied for alertme@example.com mailbox UPN secret',
+          innerError: { code: 'MailboxNotEnabledForRESTAPI' },
+        },
+      }),
+      {
+        status: 403,
+        headers: {
+          'content-type': 'application/json',
+          'request-id': 'req-zzz-999',
+        },
+      },
+    );
+    const { fetch: stub } = fetchStub([graph403]);
+
+    await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        alert,
+        fetchImpl: stub,
+        // Force escalation on the first 403 so the test stays cheap.
+        forbiddenBackoffThreshold: 1,
+        now: fixedNow('2026-05-29T12:00:00.000Z'),
+      }),
+    );
+
+    expect(state.reconnectMarked).toEqual([]);
+    expect(alertCalls).toHaveLength(1);
+    const alertCall = alertCalls[0];
+    expect(alertCall.mailboxId).toBe('mb_alert');
+    expect(alertCall.consecutiveForbiddenCount).toBe(1);
+    expect(alertCall.cooldownUntil).toBeInstanceOf(Date);
+    // The email is masked, never raw.
+    expect(alertCall.emailAddressMasked).not.toBe('alertme@example.com');
+    // Diagnostics carry only enum codes + request id — no token / body / UPN.
+    const serialized = JSON.stringify(alertCall);
+    expect(serialized).toContain('code=ErrorAccessDenied');
+    expect(serialized).not.toContain('opaque-access-token-zzz');
+    expect(serialized).not.toContain('Access is denied');
+    expect(serialized).not.toContain('UPN');
+    expect(serialized).not.toContain('alertme@example.com');
+  });
+
+  it('does NOT alert while the streak is still below the threshold', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_quiet',
+      emailAddress: 'quiet@example.com',
+      microsoftDeltaCursor: null,
+      deltaForbiddenCount: 0,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_quiet: 'token-healthy' });
+    const { port: enqueue } = createFakeEnqueue();
+    const { port: alert, calls: alertCalls } = createFakeAlert();
+    const { fetch: stub } = fetchStub([errorResponse(403)]);
+
+    await runDeltaPollingOnce(
+      buildDeps({
+        repo,
+        accessToken,
+        enqueue,
+        alert,
+        fetchImpl: stub,
+        // Default threshold 3; first 403 → count 1, below threshold → no alert.
+      }),
+    );
+
+    expect(alertCalls).toEqual([]);
+    expect(state.forbiddenBackoffs).toHaveLength(1);
+    expect(state.forbiddenBackoffs[0].cooldownUntil).toBeNull();
+  });
+
+  it('clears the backoff state after a successful poll following a forbidden streak', async () => {
+    const mailbox: DeltaPollingMailbox = {
+      id: 'mb_recover',
+      emailAddress: 'recover@example.com',
+      microsoftDeltaCursor: 'https://graph.example.com/cursor',
+      deltaForbiddenCount: 2,
+      deltaForbiddenCooldownUntil: null,
+    };
+    const { repo, state } = createFakeRepo([mailbox]);
+    const accessToken = createFakeAccessToken({ mb_recover: 'token-healthy' });
+    const { port: enqueue, calls: enqueueCalls } = createFakeEnqueue();
+    const { fetch: stub } = fetchStub([
+      jsonResponse({
+        value: [{ id: 'recovered-1' }],
+        '@odata.deltaLink': 'https://graph.example.com/delta-recovered',
+      }),
+    ]);
+
+    const result = await runDeltaPollingOnce(
+      buildDeps({ repo, accessToken, enqueue, fetchImpl: stub }),
+    );
+
+    // The poll succeeded, the message was enqueued, and the forbidden backoff
+    // state (count + cooldown + stale error metadata) was cleared.
+    expect(result.failedMailboxCount).toBe(0);
+    expect(enqueueCalls.map((c) => c.graphMessageId)).toEqual(['recovered-1']);
+    expect(state.forbiddenClears).toEqual(['mb_recover']);
+    expect(state.forbiddenBackoffs).toEqual([]);
+  });
+
+  it('forbiddenBackoffMs escalates exponentially and is capped', () => {
+    const { forbiddenBackoffMs, FORBIDDEN_BACKOFF_BASE_MS, FORBIDDEN_BACKOFF_MAX_MS } =
+      __internal;
+    const threshold = 3;
+    // At the threshold → base window; then doubles per extra consecutive cycle.
+    expect(forbiddenBackoffMs(threshold, threshold)).toBe(FORBIDDEN_BACKOFF_BASE_MS);
+    expect(forbiddenBackoffMs(threshold + 1, threshold)).toBe(
+      FORBIDDEN_BACKOFF_BASE_MS * 2,
+    );
+    expect(forbiddenBackoffMs(threshold + 2, threshold)).toBe(
+      FORBIDDEN_BACKOFF_BASE_MS * 4,
+    );
+    // Below the threshold there is no positive step (clamped to base at minimum).
+    expect(forbiddenBackoffMs(1, threshold)).toBe(FORBIDDEN_BACKOFF_BASE_MS);
+    // A long streak never exceeds the cap.
+    expect(forbiddenBackoffMs(threshold + 50, threshold)).toBe(
+      FORBIDDEN_BACKOFF_MAX_MS,
+    );
+  });
+});
+
 describe('runDeltaPollingOnce — security contract', () => {
   it('uses ONLY the injected enqueue port (no Telegram sender / pipeline call surface)', async () => {
     // The service has no path to import any telegram or detector code at
@@ -773,6 +1092,8 @@ describe('runDeltaPollingOnce — security contract', () => {
       async recordDeltaError() {},
       async resetDeltaCursor() {},
       async markReconnectRequired() {},
+      async recordForbiddenBackoff() {},
+      async clearForbiddenBackoff() {},
     };
     const accessToken = createFakeAccessToken({});
     const { port: enqueue } = createFakeEnqueue();
@@ -787,6 +1108,7 @@ describe('runDeltaPollingOnce — security contract', () => {
       bootstrappedMailboxCount: 0,
       enqueuedMessageCount: 0,
       failedMailboxCount: 0,
+      cooldownSkippedMailboxCount: 0,
     });
   });
 });
