@@ -90,3 +90,13 @@ npm test --if-present
 
 npm run build --if-present
 
+```
+
+
+
+\## Lưu ý khi viết tài liệu
+
+
+
+Khi viết docs/tasks, docs/reports, hoặc ROADMAP: KHÔNG ghi nguyên tên nhánh Git đầy đủ trong tài liệu. Nếu cần nhắc tới branch, viết bằng mô tả chung như "nhánh làm việc của task hiện tại", hoặc bỏ hẳn. Lý do: CI step "Basic secret pattern check" quét chuỗi nhạy cảm và có thể báo false positive khi tên nhánh chứa chuỗi con trùng pattern. Tránh ghi ví dụ raw có dạng tên nhánh đầy đủ hoặc chuỗi có dấu gạch chéo để không tạo false positive mới.
+

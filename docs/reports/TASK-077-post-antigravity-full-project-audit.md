@@ -33,7 +33,7 @@
 
 ## 2. Baseline nhánh / Git
 
-- Nhánh hiện tại là `feature/task-077-post-antigravity-full-project-audit`.
+- Audit được thực hiện trên nhánh làm việc của TASK-077.
 - Trước khi tạo 2 file docs của task này, working tree **không hoàn toàn sạch**: nó
   mang sẵn 5 thay đổi docs/script chưa commit kế thừa từ migration TASK-076
   (`.cursor/rules/ecc-project-rules.mdc`, `docs/MICROSOFT_SETUP.md`,
