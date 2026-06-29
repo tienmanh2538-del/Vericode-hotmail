@@ -154,7 +154,7 @@ Quy tắc bảo mật (CRITICAL):
 - Copy `Value` ngay khi vừa tạo — sau khi rời trang, Microsoft sẽ ẩn vĩnh viễn.
 - **Không** dùng `Secret ID` thay cho `Value`.
 - **Không** commit client secret vào git (kể cả tạm).
-- **Không** paste client secret vào ChatGPT / Claude / Gemini / Cursor / bất kỳ chat AI nào.
+- **Không** paste client secret vào ChatGPT / Claude / Antigravity / Cursor / bất kỳ chat AI nào.
 - **Không** lưu client secret trong `docs/`, comment code, hay bất kỳ file nào không phải `.env.local` hoặc secret manager.
 - Nếu nghi ngờ secret đã lộ ra ngoài (commit nhầm, paste nhầm, log nhầm) — **rotate ngay**: tạo secret mới và xóa secret cũ trên Entra portal.
 

@@ -118,7 +118,7 @@ MVP được coi là đạt khi:
 
 6\. Log hiển thị trạng thái xử lý rõ ràng.
 
-7\. Gemini review không còn lỗi Critical/High.
+7\. Antigravity CLI review không còn lỗi Critical/High.
 
 8\. GitHub Actions pass.
 

@@ -83,7 +83,7 @@ mục 7.
 
 - [ ] GitHub Actions đang xanh ở thay đổi gần nhất.
 - [ ] `npm run verify` đã PASS ở thay đổi gần nhất.
-- [ ] Gemini review đã PASS cho task liên quan (nếu có thay đổi).
+- [ ] Antigravity CLI review đã PASS cho task liên quan (nếu có thay đổi).
 - [ ] **Daily operations checklist** (TASK-062) gần nhất **không có blocker**.
 - [ ] Health dashboard (`/admin/health`) không có Error/Degraded bất thường.
 - [ ] Worker/queue không có backlog bất thường (nếu dashboard hiển thị).

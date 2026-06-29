@@ -9,7 +9,7 @@ Project này dùng nhiều AI phối hợp:
 
 - ChatGPT: planner/PM
 - Claude Code: coder chính
-- Gemini CLI: reviewer/tester
+- Antigravity CLI: reviewer/tester (từ TASK-076 thay cho Gemini CLI)
 - Cursor: xem project, sửa nhỏ khi được duyệt
 
 ## Luật bắt buộc
