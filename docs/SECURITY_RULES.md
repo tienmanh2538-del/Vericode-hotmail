@@ -2,7 +2,8 @@
 
 Foundation security rules for the Verification Tool. These rules apply to every
 task in every sprint and must be respected by every AI agent (Claude Code,
-Gemini CLI, Cursor, ChatGPT).
+Antigravity CLI, Cursor, ChatGPT). The independent reviewer/tester role moved
+from Gemini CLI to Antigravity CLI in TASK-076.
 
 ## 1. Secrets
 
@@ -77,8 +78,10 @@ Gemini CLI, Cursor, ChatGPT).
 
 - Claude Code: may edit code; must declare files before editing; must report
   results after editing.
-- Gemini CLI: review/test only; no file edits unless the prompt contains
-  `ALLOW_GEMINI_EDIT=true`.
+- Antigravity CLI: review/test only; no file edits unless the prompt contains
+  `ALLOW_ANTIGRAVITY_EDIT=true`. Must never read or print `.env*`, and must never
+  log tokens, refresh tokens, client secrets, Telegram bot tokens, full
+  verification codes, or full email bodies. Always concludes PASS or FAIL.
 - ChatGPT: planning/explanation only; does not touch local code.
 - No agent may read or print `.env` content without explicit, justified
   human approval.

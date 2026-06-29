@@ -70,7 +70,7 @@ Sau khi sửa xong, luôn báo:
 
 4\. Test/lint/build PASS hay FAIL
 
-5\. Cần Gemini review phần nào
+5\. Cần Antigravity CLI review phần nào
 
 
 

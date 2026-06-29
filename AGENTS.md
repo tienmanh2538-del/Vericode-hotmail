@@ -14,7 +14,7 @@ Project này dùng nhiều AI cùng phối hợp theo dây chuyền:
 
 \- Claude Code: coder chính, được phép sửa code khi task đã rõ.
 
-\- Gemini CLI: tester và reviewer độc lập, mặc định không sửa code.
+\- Antigravity CLI: tester và reviewer độc lập, mặc định không sửa code.
 
 \- Cursor: môi trường xem project, hỗ trợ sửa nhỏ khi người dùng duyệt.
 
@@ -82,15 +82,15 @@ Project này dùng nhiều AI cùng phối hợp theo dây chuyền:
 
 
 
-\### Gemini CLI
+\### Antigravity CLI
 
 
 
-\- Là reviewer/tester độc lập.
+\- Là reviewer/tester độc lập (từ TASK-076 thay cho Gemini CLI).
 
 \- Mặc định không sửa file.
 
-\- Chỉ sửa khi prompt có dòng: `ALLOW\_GEMINI\_EDIT=true`.
+\- Chỉ sửa khi prompt có dòng: `ALLOW\_ANTIGRAVITY\_EDIT=true`.
 
 \- Luôn kết luận PASS hoặc FAIL.
 
