@@ -21,7 +21,9 @@ import {
   listTelegramDestinations,
   TelegramDestinationConflictError,
   TelegramDestinationValidationError,
+  updateTelegramDestination,
 } from '@/services/telegram/telegram-destination.service';
+import { TelegramScopeError } from '@/services/telegram/telegram-scope-error';
 
 const FIXTURE_ROW = {
   id: 'dest_1',
@@ -175,5 +177,93 @@ describe('disableTelegramDestination', () => {
       }),
     );
     expect(result.status).toBe('DISABLED');
+  });
+});
+
+// TASK-078 — create/update/disable are now scoped to the caller's customers. A
+// restricted ('assigned') scope must fail closed when the destination's customer
+// (existing or target) is out of scope, without mutating anything. The 'all'
+// scope keeps full access.
+describe('destination customer-scope guard (TASK-078)', () => {
+  const validInput = {
+    customerId: 'cu_1',
+    displayName: 'Client A group',
+    telegramGroupName: 'Client A verification',
+    telegramChatId: '-1001234567890',
+    status: 'ACTIVE' as const,
+  };
+
+  it('create: rejects a destination for a customer outside the assigned scope', async () => {
+    await expect(
+      createTelegramDestination(validInput, {
+        kind: 'assigned',
+        customerIds: ['cu_other'],
+      }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('create: allows a destination for an in-scope customer', async () => {
+    findFirst.mockResolvedValue(null);
+    create.mockResolvedValue(FIXTURE_ROW);
+    await createTelegramDestination(validInput, {
+      kind: 'assigned',
+      customerIds: ['cu_1'],
+    });
+    expect(create).toHaveBeenCalled();
+  });
+
+  it('update: rejects editing a destination whose existing customer is out of scope', async () => {
+    // The stored destination belongs to cu_1, but the caller is scoped to cu_other.
+    findUnique.mockResolvedValue({ customerId: 'cu_1' });
+    await expect(
+      updateTelegramDestination('dest_1', validInput, {
+        kind: 'assigned',
+        customerIds: ['cu_other'],
+      }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('update: rejects reassigning a destination to a customer outside the scope', async () => {
+    // Caller may touch cu_1 (existing), but tries to move it to cu_other.
+    findUnique.mockResolvedValue({ customerId: 'cu_1' });
+    await expect(
+      updateTelegramDestination(
+        'dest_1',
+        { ...validInput, customerId: 'cu_other' },
+        { kind: 'assigned', customerIds: ['cu_1'] },
+      ),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('update: allows an in-scope edit', async () => {
+    findUnique.mockResolvedValue({ customerId: 'cu_1' });
+    findFirst.mockResolvedValue(null);
+    update.mockResolvedValue(FIXTURE_ROW);
+    await updateTelegramDestination('dest_1', validInput, {
+      kind: 'assigned',
+      customerIds: ['cu_1'],
+    });
+    expect(update).toHaveBeenCalled();
+  });
+
+  it('disable: rejects when the assigned scope excludes the destination customer', async () => {
+    findUnique.mockResolvedValue({ customerId: 'cu_1' });
+    await expect(
+      disableTelegramDestination('dest_1', {
+        kind: 'assigned',
+        customerIds: ['cu_other'],
+      }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('disable: the unrestricted scope skips the lookup and mutates', async () => {
+    update.mockResolvedValue({ ...FIXTURE_ROW, status: 'DISABLED' });
+    await disableTelegramDestination('dest_1', { kind: 'all' });
+    expect(findUnique).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalled();
   });
 });

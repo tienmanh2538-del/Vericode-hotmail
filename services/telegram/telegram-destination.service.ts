@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma';
 import type { CustomerScope } from '@/lib/auth/access-scope';
 import { scopeAllowsCustomer } from '@/lib/auth/access-scope';
+import { TelegramScopeError } from './telegram-scope-error';
 import {
   validateTelegramDestinationInput,
   type RawTelegramDestinationInput,
@@ -138,14 +139,42 @@ async function assertNoDuplicate(
   }
 }
 
+// TASK-078 — fail closed on the caller's scope before touching an existing
+// destination. Only the restricted ('assigned') scope needs a lookup; 'all' is a
+// no-op and an omitted scope keeps the legacy worker/system behavior. An
+// out-of-scope OR missing row both raise TelegramScopeError so the caller can
+// neither mutate nor confirm a destination it cannot see.
+async function assertDestinationInScope(
+  id: string,
+  scope: CustomerScope,
+): Promise<void> {
+  if (scope.kind === 'all') return;
+  const row = await prisma.telegramDestination.findUnique({
+    where: { id },
+    select: { customerId: true },
+  });
+  if (!row || !scopeAllowsCustomer(scope, row.customerId)) {
+    throw new TelegramScopeError(
+      'You do not have access to this Telegram destination.',
+    );
+  }
+}
+
 export async function createTelegramDestination(
   raw: RawTelegramDestinationInput,
+  scope?: CustomerScope,
 ): Promise<TelegramDestinationRecord> {
   const result = validateTelegramDestinationInput(raw);
   if (!result.ok) {
     throw new TelegramDestinationValidationError(result.errors);
   }
   const input = result.data;
+
+  // Fail closed: a restricted caller cannot create a destination for a customer
+  // outside their scope.
+  if (scope && !scopeAllowsCustomer(scope, input.customerId)) {
+    throw new TelegramScopeError('You do not have access to this customer.');
+  }
 
   await assertNoDuplicate(input);
 
@@ -167,6 +196,7 @@ export async function createTelegramDestination(
 export async function updateTelegramDestination(
   id: string,
   raw: RawTelegramDestinationInput,
+  scope?: CustomerScope,
 ): Promise<TelegramDestinationRecord> {
   if (!id) {
     throw new TelegramDestinationValidationError({
@@ -178,6 +208,16 @@ export async function updateTelegramDestination(
     throw new TelegramDestinationValidationError(result.errors);
   }
   const input = result.data;
+
+  // Fail closed on BOTH sides: a restricted caller cannot edit a destination of a
+  // customer outside their scope, nor reassign it to a customer outside their
+  // scope.
+  if (scope) {
+    await assertDestinationInScope(id, scope);
+    if (!scopeAllowsCustomer(scope, input.customerId)) {
+      throw new TelegramScopeError('You do not have access to the target customer.');
+    }
+  }
 
   await assertNoDuplicate(input, { excludeId: id });
 
@@ -199,12 +239,14 @@ export async function updateTelegramDestination(
 
 export async function disableTelegramDestination(
   id: string,
+  scope?: CustomerScope,
 ): Promise<TelegramDestinationRecord> {
   if (!id) {
     throw new TelegramDestinationValidationError({
       displayName: 'Destination id is required.',
     });
   }
+  if (scope) await assertDestinationInScope(id, scope);
   // Disabling a destination does NOT touch linked mappings; the resolve pipeline
   // refuses to send through a DISABLED destination, so disabling here is enough
   // to stop delivery without rewriting mapping rows.

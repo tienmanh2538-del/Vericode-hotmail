@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/prisma';
 import type { CustomerScope } from '@/lib/auth/access-scope';
 import { scopeAllowsCustomer } from '@/lib/auth/access-scope';
+import { TelegramScopeError } from './telegram-scope-error';
 import {
   isUniqueConstraintError,
   uniqueConstraintTargetIncludes,
@@ -530,12 +531,33 @@ async function assertNoConflictForDestination(
   }
 }
 
+// TASK-078 — fail closed on the caller's scope before a disable/delete mutation.
+// Only the restricted ('assigned') scope needs a lookup; the unrestricted ('all')
+// scope is a no-op and an omitted scope keeps the legacy worker/system behavior.
+// An out-of-scope OR missing row both raise TelegramScopeError so the caller can
+// neither mutate nor confirm a resource it cannot see.
+async function assertMappingInScope(
+  id: string,
+  scope: CustomerScope,
+): Promise<void> {
+  if (scope.kind === 'all') return;
+  const row = await prisma.telegramMapping.findUnique({
+    where: { id },
+    select: { mailbox: { select: { customerId: true } } },
+  });
+  if (!row || !scopeAllowsCustomer(scope, row.mailbox?.customerId ?? null)) {
+    throw new TelegramScopeError('You do not have access to this Telegram mapping.');
+  }
+}
+
 export async function disableTelegramMapping(
   id: string,
+  scope?: CustomerScope,
 ): Promise<TelegramMappingRecord> {
   if (!id) {
     throw new TelegramMappingValidationError({ mailboxId: 'Mapping id is required.' });
   }
+  if (scope) await assertMappingInScope(id, scope);
   const row = await prisma.telegramMapping.update({
     where: { id },
     data: { status: 'DISABLED' },
@@ -545,10 +567,14 @@ export async function disableTelegramMapping(
   return toRecord(row);
 }
 
-export async function deleteTelegramMapping(id: string): Promise<void> {
+export async function deleteTelegramMapping(
+  id: string,
+  scope?: CustomerScope,
+): Promise<void> {
   if (!id) {
     throw new TelegramMappingValidationError({ mailboxId: 'Mapping id is required.' });
   }
+  if (scope) await assertMappingInScope(id, scope);
   await prisma.telegramMapping.delete({ where: { id } });
   // TODO(TASK-016): record audit log for Telegram mapping delete.
 }

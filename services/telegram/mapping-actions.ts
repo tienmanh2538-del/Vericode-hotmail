@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requirePermission } from '@/lib/auth/guards';
+import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import {
   createTelegramMappingFromDestination,
   deleteTelegramMapping,
@@ -46,11 +47,12 @@ export async function createTelegramMappingAction(
   _prev: TelegramMappingFormState,
   formData: FormData,
 ): Promise<TelegramMappingFormState> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
   const values = readForm(formData);
 
   try {
-    await createTelegramMappingFromDestination(values);
+    await createTelegramMappingFromDestination(values, scope);
   } catch (error) {
     return failureState(values, error);
   }
@@ -64,11 +66,12 @@ export async function updateTelegramMappingAction(
   _prev: TelegramMappingFormState,
   formData: FormData,
 ): Promise<TelegramMappingFormState> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
   const values = readForm(formData);
 
   try {
-    await updateTelegramMappingFromDestination(id, values);
+    await updateTelegramMappingFromDestination(id, values, scope);
   } catch (error) {
     return failureState(values, error);
   }
@@ -79,13 +82,15 @@ export async function updateTelegramMappingAction(
 }
 
 export async function disableTelegramMappingAction(id: string): Promise<void> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
-  await disableTelegramMapping(id);
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
+  await disableTelegramMapping(id, scope);
   revalidatePath('/admin/telegram');
 }
 
 export async function deleteTelegramMappingAction(id: string): Promise<void> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
-  await deleteTelegramMapping(id);
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
+  await deleteTelegramMapping(id, scope);
   revalidatePath('/admin/telegram');
 }

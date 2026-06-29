@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requirePermission } from '@/lib/auth/guards';
+import { resolveCustomerScope } from '@/lib/auth/access-scope';
 import {
   createTelegramDestination,
   disableTelegramDestination,
@@ -49,11 +50,12 @@ export async function createTelegramDestinationAction(
   _prev: TelegramDestinationFormState,
   formData: FormData,
 ): Promise<TelegramDestinationFormState> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
   const values = readForm(formData);
 
   try {
-    await createTelegramDestination(values);
+    await createTelegramDestination(values, scope);
   } catch (error) {
     return failureState(values, error);
   }
@@ -67,11 +69,12 @@ export async function updateTelegramDestinationAction(
   _prev: TelegramDestinationFormState,
   formData: FormData,
 ): Promise<TelegramDestinationFormState> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
   const values = readForm(formData);
 
   try {
-    await updateTelegramDestination(id, values);
+    await updateTelegramDestination(id, values, scope);
   } catch (error) {
     return failureState(values, error);
   }
@@ -82,7 +85,8 @@ export async function updateTelegramDestinationAction(
 }
 
 export async function disableTelegramDestinationAction(id: string): Promise<void> {
-  await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
-  await disableTelegramDestination(id);
+  const user = await requirePermission('MANAGE_TELEGRAM_MAPPINGS');
+  const scope = await resolveCustomerScope(user);
+  await disableTelegramDestination(id, scope);
   revalidatePath('/admin/telegram');
 }

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TelegramDestinationForm } from "@/components/forms/TelegramDestinationForm";
 import { requirePermission } from "@/lib/auth/guards";
+import { resolveCustomerScope } from "@/lib/auth/access-scope";
 import { updateTelegramDestinationAction } from "@/services/telegram/destination-actions";
 import type { TelegramDestinationFormState } from "@/services/telegram/destination-form-state";
 import { getTelegramDestinationById } from "@/services/telegram/telegram-destination.service";
@@ -19,8 +20,10 @@ export default async function EditTelegramDestinationPage({
   params,
 }: EditDestinationPageProps) {
   // Editing a destination is a MANAGE_TELEGRAM_MAPPINGS action; STAFF blocked.
-  await requirePermission("MANAGE_TELEGRAM_MAPPINGS");
-  const destination = await getTelegramDestinationById(params.id);
+  const user = await requirePermission("MANAGE_TELEGRAM_MAPPINGS");
+  // TASK-078 — fail closed: an out-of-scope destination resolves to null → notFound.
+  const scope = await resolveCustomerScope(user);
+  const destination = await getTelegramDestinationById(params.id, scope);
   if (!destination) {
     notFound();
   }

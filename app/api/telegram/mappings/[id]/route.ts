@@ -9,6 +9,7 @@ import {
   TelegramDestinationMappingValidationError,
   updateTelegramMappingFromDestination,
 } from '@/services/telegram/telegram-mapping.service';
+import { TelegramScopeError } from '@/services/telegram/telegram-scope-error';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,9 +75,14 @@ export async function PATCH(
   const url = new URL(request.url);
   const action = url.searchParams.get('action');
 
+  // TASK-078 — every mutation is scoped to the caller's customers. OWNER/ADMIN
+  // resolve to the unrestricted 'all' scope (no-op); a restricted caller cannot
+  // disable/update a mapping outside their scope.
+  const scope = await resolveCustomerScope(user);
+
   try {
     if (action === 'disable') {
-      const updated = await disableTelegramMapping(id);
+      const updated = await disableTelegramMapping(id, scope);
       return NextResponse.json({ ok: true, data: serialize(updated) });
     }
 
@@ -99,9 +105,9 @@ export async function PATCH(
     // TASK-065 — route the legacy update through the destination-based service
     // path so customer isolation is enforced (mailbox and destination must share
     // a customer). Raw `telegramChatId`/group/thread are no longer trusted; the
-    // caller supplies a `destinationId`. The viewer scope is passed so a
-    // restricted caller cannot move a mapping onto an out-of-scope mailbox.
-    const scope = await resolveCustomerScope(user);
+    // caller supplies a `destinationId`. The viewer scope (resolved above) is
+    // passed so a restricted caller cannot move a mapping onto an out-of-scope
+    // mailbox.
     const updated = await updateTelegramMappingFromDestination(
       id,
       body as Record<string, unknown>,
@@ -109,6 +115,14 @@ export async function PATCH(
     );
     return NextResponse.json({ ok: true, data: serialize(updated) });
   } catch (error) {
+    // Out-of-scope is reported as 404 so a restricted caller cannot confirm the
+    // mapping exists.
+    if (error instanceof TelegramScopeError) {
+      return NextResponse.json(
+        { ok: false, error: 'Telegram mapping not found' },
+        { status: 404 },
+      );
+    }
     if (error instanceof TelegramDestinationMappingValidationError) {
       return NextResponse.json(
         { ok: false, error: 'Validation failed', fields: error.errors },
@@ -149,10 +163,22 @@ export async function DELETE(
     );
   }
 
+  // TASK-078 — scope the delete to the caller's customers. OWNER/ADMIN resolve to
+  // the unrestricted 'all' scope (no-op); a restricted caller cannot delete a
+  // mapping outside their scope (reported as 404, not 403, to avoid leaking
+  // existence).
+  const scope = await resolveCustomerScope(user);
+
   try {
-    await deleteTelegramMapping(id);
+    await deleteTelegramMapping(id, scope);
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (error) {
+    if (error instanceof TelegramScopeError) {
+      return NextResponse.json(
+        { ok: false, error: 'Telegram mapping not found' },
+        { status: 404 },
+      );
+    }
     return NextResponse.json(
       { ok: false, error: 'Could not delete Telegram mapping' },
       { status: 500 },

@@ -11,15 +11,19 @@ const {
   mailboxFindUnique,
   destinationFindUnique,
   mappingFindFirst,
+  mappingFindUnique,
   mappingCreate,
   mappingUpdate,
+  mappingDelete,
 } = vi.hoisted(() => ({
   getCurrentUserMock: vi.fn<() => Promise<AuthUser | null>>(),
   mailboxFindUnique: vi.fn(),
   destinationFindUnique: vi.fn(),
   mappingFindFirst: vi.fn(),
+  mappingFindUnique: vi.fn(),
   mappingCreate: vi.fn(),
   mappingUpdate: vi.fn(),
+  mappingDelete: vi.fn(),
 }));
 
 vi.mock('@/lib/auth/session', () => ({
@@ -32,14 +36,16 @@ vi.mock('@/lib/prisma', () => ({
     telegramDestination: { findUnique: destinationFindUnique },
     telegramMapping: {
       findFirst: mappingFindFirst,
+      findUnique: mappingFindUnique,
       create: mappingCreate,
       update: mappingUpdate,
+      delete: mappingDelete,
     },
   },
 }));
 
 import { POST } from '@/app/api/telegram/mappings/route';
-import { PATCH } from '@/app/api/telegram/mappings/[id]/route';
+import { PATCH, DELETE } from '@/app/api/telegram/mappings/[id]/route';
 
 const ADMIN: AuthUser = { id: 'admin-1', email: 'admin@example.com', role: 'ADMIN' };
 const OWNER: AuthUser = { id: 'owner-1', email: 'owner@example.com', role: 'OWNER' };
@@ -94,13 +100,28 @@ function patchRequest(body: unknown): Request {
   });
 }
 
+function disableRequest(): Request {
+  return new Request('http://localhost/api/telegram/mappings/tm_1?action=disable', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function deleteRequest(): Request {
+  return new Request('http://localhost/api/telegram/mappings/tm_1', {
+    method: 'DELETE',
+  });
+}
+
 beforeEach(() => {
   getCurrentUserMock.mockReset();
   mailboxFindUnique.mockReset();
   destinationFindUnique.mockReset();
   mappingFindFirst.mockReset();
+  mappingFindUnique.mockReset();
   mappingCreate.mockReset();
   mappingUpdate.mockReset();
+  mappingDelete.mockReset();
 });
 
 describe('POST /api/telegram/mappings — customer isolation (TASK-065)', () => {
@@ -263,5 +284,49 @@ describe('PATCH /api/telegram/mappings/[id] — customer isolation (TASK-065)', 
 
     expect(res.status).toBe(403);
     expect(mappingUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// TASK-078 — disable/delete are gated on MANAGE_TELEGRAM_MAPPINGS and scoped to
+// the caller's customers. STAFF_READ_ONLY is blocked at the permission layer;
+// OWNER/ADMIN resolve to the unrestricted scope and still operate normally.
+describe('disable/delete scoping (TASK-078)', () => {
+  it('disable returns 403 for STAFF_READ_ONLY without mutating', async () => {
+    getCurrentUserMock.mockResolvedValue(STAFF);
+    const res = await PATCH(disableRequest(), { params: { id: 'tm_1' } });
+    expect(res.status).toBe(403);
+    expect(mappingUpdate).not.toHaveBeenCalled();
+  });
+
+  it('delete returns 403 for STAFF_READ_ONLY without mutating', async () => {
+    getCurrentUserMock.mockResolvedValue(STAFF);
+    const res = await DELETE(deleteRequest(), { params: { id: 'tm_1' } });
+    expect(res.status).toBe(403);
+    expect(mappingDelete).not.toHaveBeenCalled();
+  });
+
+  it('ADMIN can disable (unrestricted scope skips the scope lookup)', async () => {
+    getCurrentUserMock.mockResolvedValue(ADMIN);
+    mappingUpdate.mockResolvedValue({ ...CREATED_ROW, status: 'DISABLED' });
+
+    const res = await PATCH(disableRequest(), { params: { id: 'tm_1' } });
+
+    expect(res.status).toBe(200);
+    // 'all' scope never needs the per-row scope lookup.
+    expect(mappingFindUnique).not.toHaveBeenCalled();
+    expect(mappingUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'tm_1' }, data: { status: 'DISABLED' } }),
+    );
+  });
+
+  it('ADMIN can delete (unrestricted scope skips the scope lookup)', async () => {
+    getCurrentUserMock.mockResolvedValue(ADMIN);
+    mappingDelete.mockResolvedValue(undefined);
+
+    const res = await DELETE(deleteRequest(), { params: { id: 'tm_1' } });
+
+    expect(res.status).toBe(200);
+    expect(mappingFindUnique).not.toHaveBeenCalled();
+    expect(mappingDelete).toHaveBeenCalledWith({ where: { id: 'tm_1' } });
   });
 });

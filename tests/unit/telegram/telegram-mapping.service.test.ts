@@ -53,6 +53,7 @@ import {
   updateTelegramMapping,
   updateTelegramMappingFromDestination,
 } from '@/services/telegram/telegram-mapping.service';
+import { TelegramScopeError } from '@/services/telegram/telegram-scope-error';
 
 const FIXTURE_ROW = {
   id: 'tm_1',
@@ -406,6 +407,65 @@ describe('deleteTelegramMapping', () => {
       TelegramMappingValidationError,
     );
     expect(deleteFn).not.toHaveBeenCalled();
+  });
+});
+
+// TASK-078 — disable/delete are now scoped to the caller's customers. The
+// 'assigned' scope must fail closed for a mapping whose mailbox customer is out
+// of scope (or for a missing row), without mutating anything. The unrestricted
+// 'all' scope keeps full access and never needs the extra lookup.
+describe('disable/delete customer-scope guard (TASK-078)', () => {
+  const inScopeRow = { mailbox: { customerId: 'cu_1' } };
+
+  it('disable: rejects when the assigned scope excludes the mapping customer', async () => {
+    findUnique.mockResolvedValue(inScopeRow);
+    await expect(
+      disableTelegramMapping('tm_1', { kind: 'assigned', customerIds: ['cu_other'] }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('disable: allows when the assigned scope includes the mapping customer', async () => {
+    findUnique.mockResolvedValue(inScopeRow);
+    update.mockResolvedValue({ ...FIXTURE_ROW, status: 'DISABLED' });
+    const result = await disableTelegramMapping('tm_1', {
+      kind: 'assigned',
+      customerIds: ['cu_1'],
+    });
+    expect(result.status).toBe('DISABLED');
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'tm_1' }, data: { status: 'DISABLED' } }),
+    );
+  });
+
+  it('disable: the unrestricted scope skips the lookup and mutates', async () => {
+    update.mockResolvedValue({ ...FIXTURE_ROW, status: 'DISABLED' });
+    await disableTelegramMapping('tm_1', { kind: 'all' });
+    expect(findUnique).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalled();
+  });
+
+  it('disable: fails closed when the row does not exist (assigned scope)', async () => {
+    findUnique.mockResolvedValue(null);
+    await expect(
+      disableTelegramMapping('missing', { kind: 'assigned', customerIds: ['cu_1'] }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('delete: rejects when the assigned scope excludes the mapping customer', async () => {
+    findUnique.mockResolvedValue(inScopeRow);
+    await expect(
+      deleteTelegramMapping('tm_1', { kind: 'assigned', customerIds: ['cu_other'] }),
+    ).rejects.toBeInstanceOf(TelegramScopeError);
+    expect(deleteFn).not.toHaveBeenCalled();
+  });
+
+  it('delete: allows when the assigned scope includes the mapping customer', async () => {
+    findUnique.mockResolvedValue(inScopeRow);
+    deleteFn.mockResolvedValue(undefined);
+    await deleteTelegramMapping('tm_1', { kind: 'assigned', customerIds: ['cu_1'] });
+    expect(deleteFn).toHaveBeenCalledWith({ where: { id: 'tm_1' } });
   });
 });
 

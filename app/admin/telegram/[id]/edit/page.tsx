@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { TelegramMappingForm } from "@/components/forms/TelegramMappingForm";
 import { requirePermission } from "@/lib/auth/guards";
+import { resolveCustomerScope, type CustomerScope } from "@/lib/auth/access-scope";
 import { prisma } from "@/lib/prisma";
 import { updateTelegramMappingAction } from "@/services/telegram/mapping-actions";
 import type { TelegramMappingFormState } from "@/services/telegram/mapping-form-state";
@@ -16,7 +17,10 @@ interface EditMappingPageProps {
   params: { id: string };
 }
 
-async function listMailboxesForForm(extraMailboxId?: string | null) {
+async function listMailboxesForForm(
+  scope: CustomerScope,
+  extraMailboxId?: string | null,
+) {
   const mailboxes = await prisma.mailbox.findMany({
     orderBy: { emailAddress: "asc" },
     select: {
@@ -25,6 +29,10 @@ async function listMailboxesForForm(extraMailboxId?: string | null) {
       customerId: true,
       customer: { select: { name: true } },
     },
+    // TASK-078 — a restricted caller only sees mailboxes of assigned customers.
+    ...(scope.kind === "assigned"
+      ? { where: { customerId: { in: scope.customerIds } } }
+      : {}),
   });
   const result = mailboxes.map((mailbox) => ({
     id: mailbox.id,
@@ -50,15 +58,18 @@ export default async function EditTelegramMappingPage({
   params,
 }: EditMappingPageProps) {
   // TASK-045 — editing mappings is a MANAGE_TELEGRAM_MAPPINGS action; STAFF blocked.
-  await requirePermission("MANAGE_TELEGRAM_MAPPINGS");
-  const mapping = await getTelegramMappingById(params.id);
+  const user = await requirePermission("MANAGE_TELEGRAM_MAPPINGS");
+  // TASK-078 — fail closed: an out-of-scope mapping resolves to null → notFound,
+  // and the form's dropdowns are scoped to the caller's customers.
+  const scope = await resolveCustomerScope(user);
+  const mapping = await getTelegramMappingById(params.id, scope);
   if (!mapping) {
     notFound();
   }
 
   const [mailboxes, destinations] = await Promise.all([
-    listMailboxesForForm(mapping.mailboxId),
-    listTelegramDestinations(),
+    listMailboxesForForm(scope, mapping.mailboxId),
+    listTelegramDestinations(scope),
   ]);
   const destinationOptions = destinations.map((destination) => ({
     id: destination.id,
