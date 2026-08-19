@@ -15,6 +15,7 @@ import {
 } from '@/services/microsoft/refresh-token-failure';
 import {
   runDeltaPollingOnce,
+  DELTA_POLLING_HTTP_TIMEOUT_MS,
   type DeltaPollingAccessTokenPort,
   type DeltaPollingAlertPort,
   type DeltaPollingDeps,
@@ -211,10 +212,16 @@ export function createPrismaAccessTokenPort(
       }
       let exchanged: { accessToken: string; refreshToken?: string };
       try {
-        exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
+        // TASK-080 — bound the token-endpoint request with the same finite timeout
+        // used for the Graph delta request, so a hung token refresh can never wedge
+        // the delta cycle. A timeout surfaces as a `network` error → transient.
+        exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken, {
+          timeoutMs: DELTA_POLLING_HTTP_TIMEOUT_MS,
+        });
       } catch (error) {
         // TASK-069C — classify: only a revoked/interaction grant marks reconnect;
-        // network/429/5xx stays transient so the next poll cycle retries.
+        // network/429/5xx (and TASK-080 timeout) stays transient so the next poll
+        // cycle retries.
         throw new DeltaPollingTokenError(
           'refresh_failed',
           'failed to exchange refresh token',

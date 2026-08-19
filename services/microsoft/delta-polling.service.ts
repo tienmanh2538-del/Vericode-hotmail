@@ -20,12 +20,23 @@
 // URLs from those tokens.
 
 import { createLogger, type Logger } from '@/lib/logger';
+import {
+  fetchWithTimeout,
+  HttpTimeoutError,
+} from '@/lib/http/fetch-with-timeout';
 import { shouldMarkReconnectRequired } from './refresh-token-failure';
 
 const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 const INBOX_DELTA_PATH = "/me/mailFolders('inbox')/messages/delta";
 const DELTA_PAGE_TOP = '50';
 const DEFAULT_MAX_PAGES_PER_MAILBOX = 10;
+
+// TASK-080 — finite per-request ceiling for every Microsoft HTTP call made on the
+// delta polling path (Graph delta pages here + the token-refresh request wired in
+// the runner). A hung request is aborted after this window so `runDeltaPollingOnce`
+// always settles and the scheduler can never wedge on a single stuck cycle
+// (root cause confirmed in TASK-079). Not env-tunable in TASK-080 by design.
+export const DELTA_POLLING_HTTP_TIMEOUT_MS = 20_000;
 // TASK-036 — first-run (bootstrap) safety. Without a cursor, an unbounded delta
 // query walks the ENTIRE mailbox to reach the first @odata.deltaLink. On a very
 // large mailbox that never converges within the page cap, so the cursor is never
@@ -322,14 +333,26 @@ async function fetchDeltaPage(
 ): Promise<GraphDeltaResponse> {
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: 'GET',
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        accept: 'application/json',
+    response = await fetchWithTimeout(
+      fetchImpl,
+      url,
+      {
+        method: 'GET',
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          accept: 'application/json',
+        },
       },
-    });
-  } catch {
+      { timeoutMs: DELTA_POLLING_HTTP_TIMEOUT_MS },
+    );
+  } catch (error) {
+    // TASK-080 — a timeout is a controlled TRANSIENT failure: it must NOT be
+    // classified as 403 (forbidden) and must never trip the persistent-403
+    // cooldown (TASK-075) or flip the mailbox to RECONNECT_REQUIRED. Both the
+    // timeout and a plain network error map to the same transient kind.
+    if (error instanceof HttpTimeoutError) {
+      throw new DeltaPollingHttpError('transient', 0, 'GRAPH_TIMEOUT');
+    }
     throw new DeltaPollingHttpError('transient', 0, 'GRAPH_NETWORK_ERROR');
   }
 

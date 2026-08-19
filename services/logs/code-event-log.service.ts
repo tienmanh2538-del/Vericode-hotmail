@@ -14,6 +14,11 @@ export type CodeEventStatus =
   | 'CODE_SENT'
   | 'CODE_SKIPPED_DUPLICATE'
   | 'CODE_SKIPPED_LOW_CONFIDENCE'
+  // TASK-080 — the verification email was older than the max relay age at
+  // processing time (e.g. drained from a backlog after a worker outage) and was
+  // deliberately NOT relayed. The DB `CodeEvent.status` column is a free String,
+  // so this needs no schema/migration.
+  | 'CODE_SKIPPED_STALE'
   | 'DETECTOR_REJECTED'
   | 'EXTRACTOR_FAILED'
   | 'TELEGRAM_SEND_FAILED';
@@ -241,6 +246,7 @@ export const CODE_EVENT_STATUS_LABELS: Record<CodeEventStatus, string> = {
   CODE_SENT: 'Sent',
   CODE_SKIPPED_DUPLICATE: 'Skipped (duplicate)',
   CODE_SKIPPED_LOW_CONFIDENCE: 'Skipped (low confidence)',
+  CODE_SKIPPED_STALE: 'Skipped (stale)',
   DETECTOR_REJECTED: 'Detector rejected',
   EXTRACTOR_FAILED: 'Extractor failed',
   TELEGRAM_SEND_FAILED: 'Telegram failed',

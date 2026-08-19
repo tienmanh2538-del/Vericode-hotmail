@@ -58,6 +58,14 @@ import { createLogger, type Logger } from '@/lib/logger';
 
 const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
 
+// TASK-080 — max age of a verification email (measured against the Microsoft Graph
+// source `receivedDateTime`) that may still be relayed to Telegram. A message
+// older than this at processing time is treated as stale and never sent — this
+// protects against a backlog of expired codes being drained after a worker outage
+// (see TASK-079). Single source of truth; intentionally NOT env-tunable in TASK-080.
+const MAX_RELAY_MESSAGE_AGE_MINUTES = 30;
+const MAX_RELAY_MESSAGE_AGE_MS = MAX_RELAY_MESSAGE_AGE_MINUTES * 60 * 1000;
+
 export type GraphMessagePipelineStatus =
   | 'CODE_SENT'
   | 'SKIPPED_DUPLICATE'
@@ -66,6 +74,9 @@ export type GraphMessagePipelineStatus =
   | 'SKIPPED_LOW_CONFIDENCE'
   | 'SKIPPED_NO_CODE'
   | 'SKIPPED_NO_TELEGRAM_MAPPING'
+  // TASK-080 — verification email older than the max relay age; deliberately not
+  // relayed. Terminal skip (worker returns it, never retries).
+  | 'SKIPPED_STALE'
   // TASK-055 — another job for the SAME mailbox is already mid-pipeline; this job
   // is deferred (treated as retryable by the worker) so it never calls
   // Graph/Telegram concurrently with the in-flight job.
@@ -294,6 +305,20 @@ function pickReceivedAt(
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
   return fallback();
+}
+
+/**
+ * TASK-080 — parse the Microsoft Graph source timestamp WITHOUT any fallback.
+ * Returns null when `receivedDateTime` is missing/blank/unparseable. The stale
+ * guard must NEVER substitute the enqueue/processing time, so it relies on this
+ * (null-on-missing) rather than `pickReceivedAt` (which falls back to `now`).
+ */
+function parseGraphReceivedAt(
+  value: string | null | undefined,
+): Date | null {
+  if (!isNonEmptyString(value)) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 function readEmailAddress(
@@ -725,6 +750,54 @@ async function processActiveMailboxJob(
         reason: 'duplicate_internet_message_id',
       };
     }
+  }
+
+  // TASK-080 — stale verification message relay protection. Placed AFTER the
+  // early message-identity dedup (so existing duplicate reporting is unchanged)
+  // and BEFORE detection/extraction/claim/Telegram (so the Telegram sender is
+  // NEVER reached for a stale message, and we do not extract/log a code just to
+  // decide staleness). Freshness is measured against the Graph source timestamp
+  // ONLY — never the enqueue/processing time — so an old email that was just
+  // enqueued today is still stale.
+  const sourceReceivedAt = parseGraphReceivedAt(message.receivedDateTime);
+  if (sourceReceivedAt !== null) {
+    const ageMs = now().getTime() - sourceReceivedAt.getTime();
+    if (ageMs > MAX_RELAY_MESSAGE_AGE_MS) {
+      logger.info('Graph message job skipped: stale verification message', {
+        mailboxId: mailbox.id,
+        ageMinutes: Math.round(ageMs / 60_000),
+        maxAgeMinutes: MAX_RELAY_MESSAGE_AGE_MINUTES,
+      });
+      safeRecordCodeEvent(
+        audit,
+        {
+          mailboxEmail: mailbox.emailAddress,
+          customerName: mailbox.customerName ?? undefined,
+          status: 'CODE_SKIPPED_STALE',
+          source: 'webhook',
+          receivedAt,
+          message: `stale_gt_${MAX_RELAY_MESSAGE_AGE_MINUTES}m`,
+        },
+        logger,
+      );
+      return {
+        ok: false,
+        status: 'SKIPPED_STALE',
+        ...baseResultKeys,
+        sentToTelegram: false,
+        reason: 'stale_message',
+      };
+    }
+  } else {
+    // Fail-safe: Graph's data contract always includes `receivedDateTime`. A
+    // missing/invalid value is an anomaly we cannot date. We do NOT fall back to
+    // the enqueue/processing time (that would defeat the guard) and we do NOT
+    // drop a possibly-valid code on an anomaly — we proceed with normal
+    // processing and record a safe warning. See TASK-080 report.
+    logger.warn(
+      'Graph message has no usable receivedDateTime — skipping stale check',
+      { mailboxId: mailbox.id },
+    );
   }
 
   // Step 5 + 6: detect Facebook/Meta verification.

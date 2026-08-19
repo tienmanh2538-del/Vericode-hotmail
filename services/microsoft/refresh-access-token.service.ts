@@ -1,5 +1,6 @@
 import { requireMicrosoftEnv, type EnvValues } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
+import { fetchWithTimeout } from '@/lib/http/fetch-with-timeout';
 
 const logger = createLogger();
 
@@ -38,6 +39,12 @@ export interface RefreshAccessTokenResult {
 export interface RefreshAccessTokenOptions {
   env?: EnvValues;
   fetchImpl?: typeof fetch;
+  // TASK-080 — optional finite timeout for the token-endpoint request. Callers on
+  // a scheduler-bound path (delta polling) pass this so a hung token request can
+  // never wedge the cycle. Omitted ⇒ unchanged behaviour (no timeout) for the
+  // email worker / OAuth / renewal callers that do not opt in. A timeout surfaces
+  // as a `network` error, which classifies as transient (never reconnect).
+  timeoutMs?: number;
 }
 
 interface TokenEndpointSuccessPayload {
@@ -97,15 +104,23 @@ export async function refreshMicrosoftAccessToken(
 
   let response: Response;
   try {
-    response = await fetchImpl(tokenUrl, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        accept: 'application/json',
+    response = await fetchWithTimeout(
+      fetchImpl,
+      tokenUrl,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+        },
+        body: body.toString(),
       },
-      body: body.toString(),
-    });
+      { timeoutMs: options.timeoutMs },
+    );
   } catch {
+    // TASK-080 — a timeout (HttpTimeoutError) or any network failure is reported
+    // as a `network` error, which `classifyRefreshTokenError` treats as transient
+    // (never reconnect). The underlying request was truly aborted on timeout.
     logger.error('Microsoft token endpoint network call failed (refresh grant)');
     throw new RefreshAccessTokenError('network', 'Microsoft token request failed');
   }

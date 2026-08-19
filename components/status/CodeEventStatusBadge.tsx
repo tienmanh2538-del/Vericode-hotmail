@@ -12,6 +12,7 @@ const VARIANT_BY_STATUS: Record<CodeEventStatus, string> = {
   CODE_DETECTED: "code-event-status--detected",
   CODE_SKIPPED_DUPLICATE: "code-event-status--skipped",
   CODE_SKIPPED_LOW_CONFIDENCE: "code-event-status--skipped",
+  CODE_SKIPPED_STALE: "code-event-status--skipped",
   DETECTOR_REJECTED: "code-event-status--skipped",
   EXTRACTOR_FAILED: "code-event-status--failed",
   TELEGRAM_SEND_FAILED: "code-event-status--failed",
