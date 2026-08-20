@@ -15,9 +15,79 @@ const mailboxStore: Array<{
   customerId?: string | null;
 }> = [];
 let mailboxIdCounter = 0;
+// TASK-081 — simulates a DB failure during the mailbox save so tests can prove
+// that subscription provisioning is never reached when the save fails.
+let failMailboxWrites = false;
+
+// TASK-081 — GraphSubscription rows persisted by connect-time provisioning.
+const subscriptionStore: Array<{
+  id: string;
+  mailboxId: string;
+  subscriptionId: string;
+  resource: string;
+  clientStateHash: string;
+  expirationDateTime: Date;
+  status: string;
+  lastRenewedAt: Date | null;
+}> = [];
+let subscriptionIdCounter = 0;
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
+    graphSubscription: {
+      async findFirst({
+        where,
+      }: {
+        where: {
+          mailboxId: string;
+          status: { in: string[] };
+          expirationDateTime: { gt: Date };
+        };
+      }) {
+        const matches = subscriptionStore
+          .filter(
+            (s) =>
+              s.mailboxId === where.mailboxId &&
+              where.status.in.includes(s.status) &&
+              s.expirationDateTime.getTime() >
+                where.expirationDateTime.gt.getTime(),
+          )
+          .sort(
+            (a, b) =>
+              b.expirationDateTime.getTime() - a.expirationDateTime.getTime(),
+          );
+        return matches[0] ? { ...matches[0] } : null;
+      },
+      async create({ data }: { data: Record<string, unknown> }) {
+        subscriptionIdCounter += 1;
+        const record = {
+          id: `gsub_${subscriptionIdCounter}`,
+          mailboxId: data.mailboxId as string,
+          subscriptionId: data.subscriptionId as string,
+          resource: data.resource as string,
+          clientStateHash: data.clientStateHash as string,
+          expirationDateTime: data.expirationDateTime as Date,
+          status: data.status as string,
+          lastRenewedAt: null,
+        };
+        subscriptionStore.push(record);
+        return { ...record };
+      },
+      async update({
+        where,
+        data,
+      }: {
+        where: { subscriptionId: string };
+        data: Record<string, unknown>;
+      }) {
+        const target = subscriptionStore.find(
+          (s) => s.subscriptionId === where.subscriptionId,
+        );
+        if (!target) throw new Error('not found');
+        Object.assign(target, data);
+        return { ...target };
+      },
+    },
     mailbox: {
       async findFirst({
         where,
@@ -44,12 +114,14 @@ vi.mock('@/lib/prisma', () => ({
         where: { id: string };
         data: Record<string, unknown>;
       }) {
+        if (failMailboxWrites) throw new Error('simulated db failure');
         const target = mailboxStore.find((m) => m.id === where.id);
         if (!target) throw new Error('not found');
         Object.assign(target, data);
         return { ...target };
       },
       async create({ data }: { data: Record<string, unknown> }) {
+        if (failMailboxWrites) throw new Error('simulated db failure');
         mailboxIdCounter += 1;
         const record = {
           id: `mb_${mailboxIdCounter}`,
@@ -90,6 +162,10 @@ const CALLBACK_BASE = 'http://localhost:3000/api/microsoft/oauth/callback';
 const TOKEN_ENDPOINT = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`;
 const GRAPH_ME_URL =
   'https://graph.microsoft.com/v1.0/me?$select=id,mail,userPrincipalName,displayName';
+// TASK-081 — connect-time subscription provisioning surfaces.
+const GRAPH_SUBSCRIPTIONS_URL = 'https://graph.microsoft.com/v1.0/subscriptions';
+const FAKE_NOTIFICATION_URL = 'https://example.com/api/webhooks/microsoft/mail';
+const FAKE_GRAPH_SUB_ID = 'graph-sub-cb-001';
 
 function generateEncryptionKey(): string {
   return randomBytes(32).toString('base64');
@@ -126,6 +202,9 @@ interface FetchRouteOptions {
   tokenPayload?: Record<string, unknown>;
   graphStatus?: number;
   graphPayload?: Record<string, unknown>;
+  // TASK-081 — POST /subscriptions behaviour for provisioning tests.
+  subscriptionsStatus?: number;
+  subscriptionsPayload?: Record<string, unknown>;
 }
 
 function stubFetchRouter(options: FetchRouteOptions = {}) {
@@ -144,6 +223,14 @@ function stubFetchRouter(options: FetchRouteOptions = {}) {
     displayName: 'Callback Mailbox',
   };
 
+  const subscriptionsPayload = options.subscriptionsPayload ?? {
+    id: FAKE_GRAPH_SUB_ID,
+    resource: "/me/mailFolders('Inbox')/messages",
+    expirationDateTime: new Date(
+      Date.now() + 6 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+  };
+
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url === TOKEN_ENDPOINT) {
@@ -155,6 +242,12 @@ function stubFetchRouter(options: FetchRouteOptions = {}) {
     if (url === GRAPH_ME_URL) {
       return new Response(JSON.stringify(graphPayload), {
         status: options.graphStatus ?? 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (url === GRAPH_SUBSCRIPTIONS_URL) {
+      return new Response(JSON.stringify(subscriptionsPayload), {
+        status: options.subscriptionsStatus ?? 201,
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -180,8 +273,15 @@ function stubFetchTokenError(status = 400) {
 
 beforeEach(() => {
   stubMicrosoftEnv();
+  // TASK-081 — default to "not configured" so provisioning behaviour never
+  // depends on the shell environment; tests that exercise provisioning stub the
+  // real value explicitly. Empty string counts as missing for loadEnv.
+  vi.stubEnv('MICROSOFT_GRAPH_NOTIFICATION_URL', '');
   mailboxStore.length = 0;
   mailboxIdCounter = 0;
+  subscriptionStore.length = 0;
+  subscriptionIdCounter = 0;
+  failMailboxWrites = false;
 });
 
 afterEach(() => {
@@ -536,5 +636,181 @@ describe('GET callback — token exchange failure', () => {
     expect(bodyText).not.toContain(FAKE_CODE);
     expect(bodyText).not.toContain(CLIENT_SECRET);
     expectClearedCookie(response);
+  });
+});
+
+describe('GET callback — Graph subscription provisioning (TASK-081)', () => {
+  function stubNotificationUrlEnv() {
+    vi.stubEnv('MICROSOFT_GRAPH_NOTIFICATION_URL', FAKE_NOTIFICATION_URL);
+  }
+
+  it('A. fresh connect provisions a subscription after the mailbox is saved', async () => {
+    stubNotificationUrlEnv();
+    const fetchMock = stubFetchRouter();
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('oauth')).toBe('success');
+
+    // token exchange + /me + exactly ONE subscriptions POST.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [subUrl, subInit] = fetchMock.mock.calls[2] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(subUrl).toBe(GRAPH_SUBSCRIPTIONS_URL);
+    expect(subInit.method).toBe('POST');
+    expect((subInit.headers as Record<string, string>).authorization).toBe(
+      `Bearer ${FAKE_ACCESS_TOKEN}`,
+    );
+
+    // Persisted row is renewal-compatible and stores only the hash.
+    const sentClientState = (
+      JSON.parse(subInit.body as string) as { clientState: string }
+    ).clientState;
+    expect(sentClientState.length).toBeGreaterThan(0);
+    expect(mailboxStore).toHaveLength(1);
+    expect(subscriptionStore).toHaveLength(1);
+    const sub = subscriptionStore[0];
+    expect(sub.mailboxId).toBe(mailboxStore[0].id);
+    expect(sub.subscriptionId).toBe(FAKE_GRAPH_SUB_ID);
+    expect(sub.status).toBe('ACTIVE');
+    expect(sub.expirationDateTime.getTime()).toBeGreaterThan(Date.now());
+    expect(sub.clientStateHash.length).toBeGreaterThan(0);
+    expect(sub.clientStateHash).not.toBe(sentClientState);
+    expect(sub.clientStateHash).not.toContain(sentClientState);
+  });
+
+  it('B. reconnect with a still-usable subscription does not create a duplicate', async () => {
+    stubNotificationUrlEnv();
+    const fetchMock = stubFetchRouter();
+    mailboxStore.push({
+      id: 'mb_target',
+      emailAddress: FAKE_MAILBOX_EMAIL,
+      provider: 'MICROSOFT',
+      microsoftUserId: FAKE_MS_USER_ID,
+      encryptedRefreshToken: 'stale-encrypted',
+      status: 'RECONNECT_REQUIRED',
+      tokenLastRefreshedAt: null,
+      createdById: null,
+    });
+    subscriptionStore.push({
+      id: 'gsub_seed',
+      mailboxId: 'mb_target',
+      subscriptionId: 'graph-sub-live',
+      resource: "/me/mailFolders('Inbox')/messages",
+      clientStateHash: 'seed-hash',
+      expirationDateTime: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+      status: 'ACTIVE',
+      lastRenewedAt: null,
+    });
+
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+      'mb_target',
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('oauth')).toBe('success');
+    // No subscriptions POST — only token exchange + /me.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(subscriptionStore).toHaveLength(1);
+    expect(subscriptionStore[0].subscriptionId).toBe('graph-sub-live');
+  });
+
+  it('G. provisioning failure is fail-open: connect still succeeds, mailbox intact', async () => {
+    stubNotificationUrlEnv();
+    stubFetchRouter({
+      subscriptionsStatus: 403,
+      subscriptionsPayload: { error: { code: 'AccessDenied' } },
+    });
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+    );
+    const response = await GET(request);
+
+    // The connect is still a success — no rollback, no error reason.
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.pathname).toBe('/admin/mailboxes');
+    expect(loc.searchParams.get('oauth')).toBe('success');
+    expect(loc.searchParams.get('reason')).toBeNull();
+
+    expect(mailboxStore).toHaveLength(1);
+    expect(mailboxStore[0].status).toBe('ACTIVE');
+    expect(mailboxStore[0].encryptedRefreshToken.length).toBeGreaterThan(0);
+    expect(subscriptionStore).toHaveLength(0);
+  });
+
+  it('fail-open also when the notification URL is not configured', async () => {
+    // No MICROSOFT_GRAPH_NOTIFICATION_URL stub — provisioning fails at config.
+    const fetchMock = stubFetchRouter();
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('oauth')).toBe('success');
+    // Config failure happens before any subscriptions HTTP call.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mailboxStore).toHaveLength(1);
+    expect(subscriptionStore).toHaveLength(0);
+  });
+
+  it('E. mailbox save failure → provisioning is never attempted', async () => {
+    stubNotificationUrlEnv();
+    const fetchMock = stubFetchRouter();
+    failMailboxWrites = true;
+
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('oauth')).toBe('error');
+    expect(loc.searchParams.get('reason')).toBe('mailbox_save_failed');
+    // token exchange + /me only — no subscriptions POST.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(subscriptionStore).toHaveLength(0);
+  });
+
+  it('F. wrong-account reconnect fails before provisioning — no subscription call', async () => {
+    stubNotificationUrlEnv();
+    const fetchMock = stubFetchRouter(); // Graph /me returns FAKE_MS_USER_ID
+    mailboxStore.push({
+      id: 'mb_other',
+      emailAddress: 'different-owner@example.com',
+      provider: 'MICROSOFT',
+      microsoftUserId: 'ms-user-different',
+      encryptedRefreshToken: 'original-encrypted',
+      status: 'RECONNECT_REQUIRED',
+      tokenLastRefreshedAt: null,
+      createdById: null,
+    });
+
+    const request = makeRequest(
+      `code=${FAKE_CODE}&state=${FAKE_STATE}`,
+      FAKE_STATE,
+      'mb_other',
+    );
+    const response = await GET(request);
+
+    const loc = parseLocation(response.headers.get('location'));
+    expect(loc.searchParams.get('reason')).toBe('mailbox_mismatch');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(subscriptionStore).toHaveLength(0);
+    // The targeted mailbox is untouched.
+    expect(mailboxStore[0].encryptedRefreshToken).toBe('original-encrypted');
+    expect(mailboxStore[0].status).toBe('RECONNECT_REQUIRED');
   });
 });

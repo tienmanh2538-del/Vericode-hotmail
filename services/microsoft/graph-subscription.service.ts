@@ -519,6 +519,16 @@ export async function createInboxSubscription(
     // Do not log the response payload — it contains clientState plaintext we
     // sent in the request and Microsoft echoes back on 201.
     logger.error('Failed to persist Graph subscription', { mailboxId });
+    // TASK-081 — the remote subscription now exists but no local row records
+    // it, so nothing (webhook validation, renewal, disconnect cleanup) would
+    // ever see it. Best-effort compensating remote DELETE, exactly once: if the
+    // cleanup itself fails we log sanitized and stop — never retried, never a
+    // fake local ACTIVE row, and the database error below still propagates.
+    try {
+      await deleteGraphSubscription({ mailboxId, subscriptionId, accessToken }, deps);
+    } catch {
+      logger.warn('Compensating Graph subscription delete failed', { mailboxId });
+    }
     throw new GraphSubscriptionError(
       'database',
       'failed to persist Graph subscription',

@@ -15,6 +15,7 @@ import {
   MailboxConnectError,
   saveConnectedMailbox,
 } from '@/services/microsoft/mailbox-connect.service';
+import { ensureInboxSubscriptionForConnectedMailbox } from '@/services/microsoft/mailbox-subscription-provisioning.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -159,6 +160,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return buildRedirect(env, 'error', 'token_exchange_failed');
   }
 
+  let savedMailbox;
   try {
     const profile = await fetchMicrosoftProfile(tokens.accessToken);
     const emailAddress = profile.mail ?? profile.userPrincipalName;
@@ -167,7 +169,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       return buildRedirect(env, 'error', 'mailbox_save_failed');
     }
 
-    await saveConnectedMailbox({
+    savedMailbox = await saveConnectedMailbox({
       microsoftUserId: profile.id,
       emailAddress,
       displayName: profile.displayName,
@@ -188,6 +190,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       logger.error('Microsoft OAuth mailbox save unexpected error');
     }
     return buildRedirect(env, 'error', 'mailbox_save_failed');
+  }
+
+  // TASK-081 — connect-time Graph subscription provisioning (Option A). Runs
+  // ONLY after the mailbox + credential are safely persisted, reusing the fresh
+  // access token from the token exchange (never persisted). The ensure service
+  // is fail-open by contract (it never throws); the extra try/catch is a
+  // boundary guarantee that a provisioning bug can never turn an already
+  // successful connect into an error — delta polling remains the backup path.
+  try {
+    await ensureInboxSubscriptionForConnectedMailbox({
+      mailboxId: savedMailbox.mailboxId,
+      accessToken: tokens.accessToken,
+    });
+  } catch {
+    logger.warn('Graph subscription provisioning threw unexpectedly after connect');
   }
 
   return buildRedirect(env, 'success');
