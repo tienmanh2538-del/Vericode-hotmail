@@ -45,7 +45,9 @@ export const CONNECT_SUBSCRIPTION_HTTP_TIMEOUT_MS = 20_000;
 // possibly live on Microsoft's side and blocks creation. EXPIRED rows never
 // block: they are only written when the remote subscription is known gone
 // (disconnect, renewal 404/410) or already past its expiration.
-const BLOCKING_SUBSCRIPTION_STATUSES: GraphSubscriptionStatus[] = [
+// Exported (TASK-082) as the single "potentially live" definition so the
+// reconciliation candidate query cannot drift from the ensure check here.
+export const BLOCKING_SUBSCRIPTION_STATUSES: GraphSubscriptionStatus[] = [
   'ACTIVE',
   'RENEWING',
   'FAILED',

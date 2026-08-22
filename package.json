@@ -21,7 +21,8 @@
     "worker:delta": "tsx scripts/run-delta-polling-worker.ts",
     "worker:delta:once": "tsx scripts/run-delta-polling-worker.ts --once",
     "worker:renewal": "tsx scripts/run-subscription-renewal-worker.ts",
-    "worker:renewal:once": "tsx scripts/run-subscription-renewal-worker.ts --once"
+    "worker:renewal:once": "tsx scripts/run-subscription-renewal-worker.ts --once",
+    "reconcile:subscriptions": "tsx scripts/run-subscription-reconciliation.ts"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

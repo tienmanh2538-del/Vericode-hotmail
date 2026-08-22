@@ -139,8 +139,18 @@ interface MailboxRefreshTokenPrismaClient {
   };
 }
 
+export interface RenewalAccessTokenPortOptions {
+  // TASK-082 — optional finite ceiling for the token-endpoint HTTP request,
+  // forwarded to `refreshMicrosoftAccessToken` (TASK-080 seam: real
+  // AbortController cancellation; a timeout surfaces as a `network` error →
+  // transient, never reconnect). Omitted ⇒ unchanged behaviour (no timeout)
+  // for the existing renewal caller.
+  timeoutMs?: number;
+}
+
 export function createPrismaRenewalAccessTokenPort(
   client: MailboxRefreshTokenPrismaClient = defaultPrisma as unknown as MailboxRefreshTokenPrismaClient,
+  options: RenewalAccessTokenPortOptions = {},
 ): RenewalAccessTokenPort {
   return {
     async getAccessTokenForMailbox(mailboxId): Promise<string> {
@@ -169,7 +179,9 @@ export function createPrismaRenewalAccessTokenPort(
       }
 
       try {
-        const exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
+        const exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken, {
+          timeoutMs: options.timeoutMs,
+        });
         // TASK-036 — persist a rotated refresh token (encrypted) so renewal does
         // not silently lose mailbox access on the next cycle. No-op when
         // Microsoft did not return a new token.
