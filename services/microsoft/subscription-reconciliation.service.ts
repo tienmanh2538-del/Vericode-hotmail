@@ -26,6 +26,21 @@
 //   local row is marked EXPIRED first (fail-safe: webhook and renewal both
 //   ignore EXPIRED) and ONE best-effort remote delete is attempted.
 //
+// TASK-083 — SUBSCRIPTION_EXPIRED recovery mode (explicit opt-in only):
+// a mailbox flipped to SUBSCRIPTION_EXPIRED by the renewal worker has no
+// webhook path, is excluded from delta polling, and nothing ever moves it back
+// to ACTIVE. With `recoverSubscriptionExpired` set, this service targets those
+// mailboxes instead: same bounded/sequential/dry-run machinery, same token and
+// ensure seams, plus exactly one new mutation primitive — a CONDITIONAL flip
+// SUBSCRIPTION_EXPIRED → ACTIVE that only fires after the ensure seam proved a
+// fresh subscription was created and persisted. The flip never overwrites a
+// state written concurrently (DISABLED / RECONNECT_REQUIRED / ACTIVE): when it
+// does not match, the CURRENT status decides what happens to the just-created
+// subscription — ACTIVE (a legitimate concurrent reconnect) keeps it intact,
+// every non-ACTIVE state makes it non-usable (local row EXPIRED first, then
+// one best-effort remote delete). Without the flag the TASK-082 behaviour is
+// byte-for-byte unchanged.
+//
 // This service NEVER logs tokens, refresh credentials, clientState plaintext,
 // verification codes, or email bodies. Results carry internal mailbox IDs and
 // outcome counters only.
@@ -39,6 +54,7 @@ export const DEFAULT_RECONCILIATION_LIMIT = 5;
 export const MAX_RECONCILIATION_LIMIT = 20;
 
 const MAILBOX_STATUS_ACTIVE = 'ACTIVE';
+const MAILBOX_STATUS_SUBSCRIPTION_EXPIRED = 'SUBSCRIPTION_EXPIRED';
 
 // ---------------------------------------------------------------------------
 // Ports
@@ -59,6 +75,16 @@ export interface SubscriptionReconciliationRepo {
     limit: number,
     now: Date,
   ): Promise<ReconciliationCandidate[]>;
+  /**
+   * TASK-083 — recovery candidates: same predicate as
+   * listReconciliationCandidates but for status SUBSCRIPTION_EXPIRED. A
+   * SEPARATE method (not a widened status filter) so normal reconciliation
+   * semantics can never accidentally include recovery targets.
+   */
+  listSubscriptionExpiredRecoveryCandidates(
+    limit: number,
+    now: Date,
+  ): Promise<ReconciliationCandidate[]>;
   getMailboxStatus(mailboxId: string): Promise<string | null>;
   hasBlockingSubscription(mailboxId: string, now: Date): Promise<boolean>;
   /**
@@ -67,6 +93,17 @@ export interface SubscriptionReconciliationRepo {
    * Returns true when a row was actually updated.
    */
   markMailboxReconnectRequiredIfActive(mailboxId: string): Promise<boolean>;
+  /** TASK-083 — same conditional mark, pinned from SUBSCRIPTION_EXPIRED. */
+  markMailboxReconnectRequiredIfSubscriptionExpired(
+    mailboxId: string,
+  ): Promise<boolean>;
+  /**
+   * TASK-083 — the one new mutation primitive: SUBSCRIPTION_EXPIRED → ACTIVE,
+   * strictly conditional on the current status so a concurrent
+   * disconnect/reconnect/worker write is never overwritten and a DISABLED
+   * mailbox can never be resurrected. Returns true only when a row matched.
+   */
+  markMailboxActiveIfSubscriptionExpired(mailboxId: string): Promise<boolean>;
   /** Fail-safe local disable of a just-created subscription (disconnect race). */
   markSubscriptionExpired(subscriptionId: string): Promise<void>;
 }
@@ -113,6 +150,14 @@ export interface SubscriptionReconciliationOptions {
   mode?: ReconciliationMode;
   /** Bounded batch size; clamped to MAX_RECONCILIATION_LIMIT. */
   limit?: number;
+  /**
+   * TASK-083 — explicit opt-in recovery mode. When true the run targets
+   * SUBSCRIPTION_EXPIRED mailboxes (recovery candidates) instead of ACTIVE
+   * ones, and a successful provision ends with the conditional
+   * SUBSCRIPTION_EXPIRED → ACTIVE flip. Default false: TASK-082 behaviour,
+   * completely untouched.
+   */
+  recoverSubscriptionExpired?: boolean;
 }
 
 export type MailboxReconciliationOutcome =
@@ -125,17 +170,31 @@ export type MailboxReconciliationOutcome =
   | 'failed_transient'
   | 'failed'
   /** Created, then the mailbox left ACTIVE → row EXPIRED + one cleanup try. */
-  | 'created_disconnect_cleanup';
+  | 'created_disconnect_cleanup'
+  /** Recovery only: provisioned AND conditionally flipped back to ACTIVE. */
+  | 'recovered'
+  /**
+   * Recovery only: the mailbox left SUBSCRIPTION_EXPIRED concurrently (e.g.
+   * disconnect, reconnect, worker write). Nothing was overwritten; if a
+   * subscription had already been created, it was made non-usable.
+   */
+  | 'skipped_state_changed';
 
 export interface MailboxReconciliationRecord {
   mailboxId: string;
   outcome: MailboxReconciliationOutcome;
-  /** Only for created_disconnect_cleanup: result of the single remote delete. */
+  /**
+   * Result of the single best-effort remote delete, present when a just-created
+   * subscription had to be made non-usable (created_disconnect_cleanup, or
+   * skipped_state_changed after a remote create).
+   */
   remoteCleanup?: 'deleted' | 'failed';
 }
 
 export interface SubscriptionReconciliationRunResult {
   mode: ReconciliationMode;
+  /** TASK-083 — true when this run was an explicit recovery invocation. */
+  recoveryMode: boolean;
   /** The limit actually applied after clamping. */
   limit: number;
   limitClamped: boolean;
@@ -148,6 +207,10 @@ export interface SubscriptionReconciliationRunResult {
   transientFailureCount: number;
   failedCount: number;
   disconnectRaceCount: number;
+  /** TASK-083 — mailboxes provisioned AND flipped back to ACTIVE. */
+  recoveredCount: number;
+  /** TASK-083 — recovery candidates whose state changed concurrently. */
+  skippedStateChangedCount: number;
   /** True when a config-level token failure aborted the whole run. */
   aborted: boolean;
   outcomes: MailboxReconciliationRecord[];
@@ -221,18 +284,38 @@ interface ReconcileContext {
   remoteCleanup: ReconciliationRemoteCleanupPort;
   logger: Logger;
   now: () => Date;
+  /** TASK-083 — recovery runs pin every state re-check to SUBSCRIPTION_EXPIRED. */
+  recovery: boolean;
 }
 
 type PerMailboxResult =
   | { record: MailboxReconciliationRecord }
   | { abortRun: true };
 
-async function isMailboxActive(
+/**
+ * The status every pre/post re-check is pinned to. Normal reconciliation only
+ * ever acts on ACTIVE mailboxes; recovery only ever acts on
+ * SUBSCRIPTION_EXPIRED ones — any other observed status means an operator or
+ * worker changed state concurrently and this run must back off.
+ */
+function requiredMailboxStatus(ctx: ReconcileContext): string {
+  return ctx.recovery
+    ? MAILBOX_STATUS_SUBSCRIPTION_EXPIRED
+    : MAILBOX_STATUS_ACTIVE;
+}
+
+function stateChangedOutcome(
+  ctx: ReconcileContext,
+): MailboxReconciliationOutcome {
+  return ctx.recovery ? 'skipped_state_changed' : 'skipped_not_active';
+}
+
+async function isMailboxInExpectedState(
   ctx: ReconcileContext,
   mailboxId: string,
 ): Promise<boolean> {
   const status = await ctx.repo.getMailboxStatus(mailboxId);
-  return status === MAILBOX_STATUS_ACTIVE;
+  return status === requiredMailboxStatus(ctx);
 }
 
 async function acquireAccessToken(
@@ -252,11 +335,13 @@ async function acquireAccessToken(
       return { failure: { abortRun: true } };
     }
     if (kind === 'reconnect_required') {
-      // Conditional mark: a concurrently disconnected (DISABLED) mailbox must
-      // never be resurrected to RECONNECT_REQUIRED.
-      const marked = await ctx.repo
-        .markMailboxReconnectRequiredIfActive(mailboxId)
-        .catch(() => false);
+      // Conditional mark pinned to the status this run is allowed to act on: a
+      // concurrently disconnected (DISABLED) mailbox — or any other concurrent
+      // state change — must never be overwritten to RECONNECT_REQUIRED.
+      const mark = ctx.recovery
+        ? ctx.repo.markMailboxReconnectRequiredIfSubscriptionExpired(mailboxId)
+        : ctx.repo.markMailboxReconnectRequiredIfActive(mailboxId);
+      const marked = await mark.catch(() => false);
       ctx.logger.warn('Reconciliation: mailbox requires reconnect', {
         mailboxId,
         marked,
@@ -272,16 +357,20 @@ async function acquireAccessToken(
   }
 }
 
-async function handlePostCreateDisconnectRace(
+/**
+ * Make a just-created subscription non-usable after the mailbox left the state
+ * this run was allowed to act on. Fail-safe local state FIRST (TASK-052
+ * ordering): an EXPIRED row is inert for the webhook (ACTIVE/RENEWING only)
+ * and the renewal worker (ACTIVE/RENEWING/FAILED only), so even a failed
+ * remote cleanup cannot make this subscription usable. Exactly one best-effort
+ * remote delete — never retried.
+ */
+async function makeCreatedSubscriptionNonUsable(
   ctx: ReconcileContext,
   mailboxId: string,
   subscriptionId: string,
   accessToken: string,
-): Promise<MailboxReconciliationRecord> {
-  // Fail-safe local state FIRST (TASK-052 ordering): an EXPIRED row is inert
-  // for the webhook (ACTIVE/RENEWING only) and the renewal worker
-  // (ACTIVE/RENEWING/FAILED only), so even a failed remote cleanup cannot make
-  // this subscription usable.
+): Promise<'deleted' | 'failed'> {
   try {
     await ctx.repo.markSubscriptionExpired(subscriptionId);
   } catch {
@@ -289,28 +378,19 @@ async function handlePostCreateDisconnectRace(
       mailboxId,
     });
   }
-  // Exactly one best-effort remote delete — never retried.
   try {
     await ctx.remoteCleanup.deleteRemoteSubscription({
       mailboxId,
       subscriptionId,
       accessToken,
     });
-    return {
-      mailboxId,
-      outcome: 'created_disconnect_cleanup',
-      remoteCleanup: 'deleted',
-    };
+    return 'deleted';
   } catch (error) {
     ctx.logger.warn('Reconciliation: remote cleanup after disconnect race failed', {
       mailboxId,
       errorName: safeErrorName(error),
     });
-    return {
-      mailboxId,
-      outcome: 'created_disconnect_cleanup',
-      remoteCleanup: 'failed',
-    };
+    return 'failed';
   }
 }
 
@@ -324,9 +404,12 @@ async function reconcileOneMailbox(
   mailboxId: string,
 ): Promise<PerMailboxResult> {
   // Local pre-check before spending a token refresh: skip mailboxes that left
-  // ACTIVE or gained a potentially-live subscription since candidate selection.
-  if (!(await isMailboxActive(ctx, mailboxId))) {
-    return { record: { mailboxId, outcome: 'skipped_not_active' } };
+  // the required status (ACTIVE / SUBSCRIPTION_EXPIRED in recovery) or gained
+  // a potentially-live subscription since candidate selection. A blocking row
+  // in recovery is the approved D2 edge: keep SUBSCRIPTION_EXPIRED, report,
+  // never create, never flip, never "repair" the inconsistency.
+  if (!(await isMailboxInExpectedState(ctx, mailboxId))) {
+    return { record: { mailboxId, outcome: stateChangedOutcome(ctx) } };
   }
   if (await ctx.repo.hasBlockingSubscription(mailboxId, ctx.now())) {
     return { record: { mailboxId, outcome: 'skipped_existing' } };
@@ -338,9 +421,9 @@ async function reconcileOneMailbox(
   }
 
   // Mandatory RE-CHECK after the token refresh and before any Graph create: a
-  // disconnect during the refresh must stop provisioning here.
-  if (!(await isMailboxActive(ctx, mailboxId))) {
-    return { record: { mailboxId, outcome: 'skipped_not_active' } };
+  // disconnect (or any state change) during the refresh must stop provisioning.
+  if (!(await isMailboxInExpectedState(ctx, mailboxId))) {
+    return { record: { mailboxId, outcome: stateChangedOutcome(ctx) } };
   }
 
   // The ensure seam performs the potentially-live (blocking-row) re-check via
@@ -359,16 +442,78 @@ async function reconcileOneMailbox(
     return { record: { mailboxId, outcome: 'failed' } };
   }
 
-  // Created: post-provision RE-CHECK. If the mailbox left ACTIVE while the
-  // remote create was in flight, make the new row non-usable and clean up.
-  if (!(await isMailboxActive(ctx, mailboxId))) {
+  if (ctx.recovery) {
+    // TASK-083 — ACTIVE is the FINAL step of recovery, and only via the
+    // conditional flip: it matches solely when the mailbox is still
+    // SUBSCRIPTION_EXPIRED, so a concurrent disconnect/reconnect/worker write
+    // is never overwritten.
+    const flipped = await ctx.repo
+      .markMailboxActiveIfSubscriptionExpired(mailboxId)
+      .catch(() => false);
+    if (flipped) {
+      return { record: { mailboxId, outcome: 'recovered' } };
+    }
+    // Antigravity High fix — a non-matching flip is NOT automatically a
+    // cleanup case. Classify by the CURRENT status first: a concurrent OAuth
+    // reconnect legitimately moved the mailbox to ACTIVE, and its ensure may
+    // have no-opped onto the very subscription this recovery just created —
+    // deleting it would leave an ACTIVE mailbox with no webhook path.
+    let statusNow: string | null = null;
+    try {
+      statusNow = await ctx.repo.getMailboxStatus(mailboxId);
+    } catch {
+      statusNow = null; // read failure → treated as unexpected, fail-safe below
+    }
+
+    if (statusNow === MAILBOX_STATUS_ACTIVE) {
+      // Valid concurrent transition (e.g. OAuth reconnect): the mailbox is
+      // ACTIVE and the subscription created by this recovery is usable — keep
+      // BOTH intact. No cleanup, no overwrite, no extra provisioning.
+      ctx.logger.info(
+        'Recovery: mailbox became ACTIVE concurrently — keeping new subscription',
+        { mailboxId },
+      );
+      return { record: { mailboxId, outcome: 'skipped_state_changed' } };
+    }
+
+    // DISABLED / RECONNECT_REQUIRED / unexpected: never resurrect and never
+    // leave the recovery-created subscription intentionally usable on a
+    // non-ACTIVE mailbox. Cleanup targets ONLY the subscription this recovery
+    // created (by its exact subscriptionId) — never another blocking row.
+    const cleanup = await makeCreatedSubscriptionNonUsable(
+      ctx,
+      mailboxId,
+      ensured.subscriptionId,
+      token.accessToken,
+    );
+    // Still SUBSCRIPTION_EXPIRED here means the flip itself malfunctioned
+    // (e.g. a write error swallowed as no-match): report a failure — the
+    // mailbox is still blind and the operator should re-run — instead of
+    // mislabelling it as a concurrent state change. No retry either way.
+    const outcome: MailboxReconciliationOutcome =
+      statusNow === MAILBOX_STATUS_SUBSCRIPTION_EXPIRED
+        ? 'failed'
+        : 'skipped_state_changed';
     return {
-      record: await handlePostCreateDisconnectRace(
-        ctx,
+      record: { mailboxId, outcome, remoteCleanup: cleanup },
+    };
+  }
+
+  // Normal mode: post-provision RE-CHECK. If the mailbox left ACTIVE while the
+  // remote create was in flight, make the new row non-usable and clean up.
+  if (!(await isMailboxInExpectedState(ctx, mailboxId))) {
+    const cleanup = await makeCreatedSubscriptionNonUsable(
+      ctx,
+      mailboxId,
+      ensured.subscriptionId,
+      token.accessToken,
+    );
+    return {
+      record: {
         mailboxId,
-        ensured.subscriptionId,
-        token.accessToken,
-      ),
+        outcome: 'created_disconnect_cleanup',
+        remoteCleanup: cleanup,
+      },
     };
   }
   return { record: { mailboxId, outcome: 'created' } };
@@ -405,6 +550,13 @@ function countOutcome(
       result.createdCount += 1;
       result.disconnectRaceCount += 1;
       break;
+    case 'recovered':
+      result.createdCount += 1;
+      result.recoveredCount += 1;
+      break;
+    case 'skipped_state_changed':
+      result.skippedStateChangedCount += 1;
+      break;
     default:
       result.failedCount += 1;
       break;
@@ -423,10 +575,12 @@ export async function runSubscriptionReconciliationOnce(
   const logger = deps.logger ?? createLogger();
   const now = deps.now ?? (() => new Date());
   const mode: ReconciliationMode = options.mode === 'apply' ? 'apply' : 'dry_run';
+  const recovery = options.recoverSubscriptionExpired === true;
   const { limit, clamped } = resolveReconciliationLimit(options.limit);
 
   const result: SubscriptionReconciliationRunResult = {
     mode,
+    recoveryMode: recovery,
     limit,
     limitClamped: clamped,
     checkedCount: 0,
@@ -438,13 +592,19 @@ export async function runSubscriptionReconciliationOnce(
     transientFailureCount: 0,
     failedCount: 0,
     disconnectRaceCount: 0,
+    recoveredCount: 0,
+    skippedStateChangedCount: 0,
     aborted: false,
     outcomes: [],
   };
 
   let candidates: ReconciliationCandidate[];
   try {
-    candidates = await deps.repo.listReconciliationCandidates(limit, now());
+    // Recovery targets are listed through a dedicated repo method so the
+    // normal candidate query is never widened by a status union.
+    candidates = recovery
+      ? await deps.repo.listSubscriptionExpiredRecoveryCandidates(limit, now())
+      : await deps.repo.listReconciliationCandidates(limit, now());
   } catch (error) {
     logger.error('Reconciliation failed to list candidates', {
       errorName: safeErrorName(error),
@@ -456,6 +616,7 @@ export async function runSubscriptionReconciliationOnce(
 
   logger.info('Subscription reconciliation started', {
     mode,
+    recoveryMode: recovery,
     limit,
     candidateCount: candidates.length,
   });
@@ -471,6 +632,7 @@ export async function runSubscriptionReconciliationOnce(
       });
     }
     logger.info('Subscription reconciliation dry-run finished', {
+      recoveryMode: recovery,
       candidateCount: result.candidateCount,
     });
     return result;
@@ -483,6 +645,7 @@ export async function runSubscriptionReconciliationOnce(
     remoteCleanup: deps.remoteCleanup,
     logger,
     now,
+    recovery,
   };
 
   // Strictly sequential — concurrency 1 by construction; each candidate is
@@ -508,6 +671,7 @@ export async function runSubscriptionReconciliationOnce(
 
   logger.info('Subscription reconciliation finished', {
     mode,
+    recoveryMode: recovery,
     checkedCount: result.checkedCount,
     createdCount: result.createdCount,
     skippedExistingCount: result.skippedExistingCount,
@@ -516,6 +680,8 @@ export async function runSubscriptionReconciliationOnce(
     transientFailureCount: result.transientFailureCount,
     failedCount: result.failedCount,
     disconnectRaceCount: result.disconnectRaceCount,
+    recoveredCount: result.recoveredCount,
+    skippedStateChangedCount: result.skippedStateChangedCount,
     aborted: result.aborted,
   });
   return result;

@@ -48,9 +48,12 @@ function fakeServiceRepo(candidates: string[]) {
     listReconciliationCandidates: vi.fn(async (limit: number) =>
       candidates.slice(0, limit).map((mailboxId) => ({ mailboxId })),
     ),
+    listSubscriptionExpiredRecoveryCandidates: vi.fn(async () => []),
     getMailboxStatus: vi.fn(async () => 'ACTIVE'),
     hasBlockingSubscription: vi.fn(async () => false),
     markMailboxReconnectRequiredIfActive: vi.fn(async () => true),
+    markMailboxReconnectRequiredIfSubscriptionExpired: vi.fn(async () => true),
+    markMailboxActiveIfSubscriptionExpired: vi.fn(async () => true),
     markSubscriptionExpired: vi.fn(async () => undefined),
   };
 }

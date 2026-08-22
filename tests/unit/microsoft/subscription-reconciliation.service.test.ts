@@ -43,6 +43,7 @@ function buildFakeDeps(options: FakeDepsOptions = {}) {
     listReconciliationCandidates: vi.fn(async (limit: number) =>
       (options.candidates ?? []).slice(0, limit).map((mailboxId) => ({ mailboxId })),
     ),
+    listSubscriptionExpiredRecoveryCandidates: vi.fn(async () => []),
     getMailboxStatus: vi.fn(async (mailboxId: string) => {
       const sequence = statusSequences.get(mailboxId);
       if (sequence && sequence.length > 0) {
@@ -54,6 +55,8 @@ function buildFakeDeps(options: FakeDepsOptions = {}) {
       async (mailboxId: string) => options.blocking?.[mailboxId] ?? false,
     ),
     markMailboxReconnectRequiredIfActive: vi.fn(async () => true),
+    markMailboxReconnectRequiredIfSubscriptionExpired: vi.fn(async () => true),
+    markMailboxActiveIfSubscriptionExpired: vi.fn(async () => true),
     markSubscriptionExpired: vi.fn(async () => undefined),
   };
   const accessToken = {
@@ -174,9 +177,12 @@ describe('runSubscriptionReconciliationOnce — invocation safety', () => {
     const { deps, repo } = buildFakeDeps({ candidates: ['mb-1'] });
     await runSubscriptionReconciliationOnce(deps);
     expect(repo.listReconciliationCandidates).toHaveBeenCalledTimes(1);
+    expect(repo.listSubscriptionExpiredRecoveryCandidates).not.toHaveBeenCalled();
     expect(repo.getMailboxStatus).not.toHaveBeenCalled();
     expect(repo.hasBlockingSubscription).not.toHaveBeenCalled();
     expect(repo.markMailboxReconnectRequiredIfActive).not.toHaveBeenCalled();
+    expect(repo.markMailboxReconnectRequiredIfSubscriptionExpired).not.toHaveBeenCalled();
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
     expect(repo.markSubscriptionExpired).not.toHaveBeenCalled();
   });
 

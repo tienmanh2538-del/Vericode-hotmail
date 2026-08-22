@@ -5,13 +5,19 @@
 //   tsx scripts/run-subscription-reconciliation.ts --limit 10     # dry-run, larger batch
 //   tsx scripts/run-subscription-reconciliation.ts --apply        # mutating run
 //   tsx scripts/run-subscription-reconciliation.ts --apply --limit 10
+//   tsx scripts/run-subscription-reconciliation.ts --recover-subscription-expired
+//   tsx scripts/run-subscription-reconciliation.ts --recover-subscription-expired --apply
 //
-// Semantics (locked in docs/tasks/TASK-082):
+// Semantics (locked in docs/tasks/TASK-082 + TASK-083):
 //   - Never scheduled, never wired into deploy/startup/workers — it only runs
 //     when an operator invokes it, and each invocation is a single pass.
 //   - Default is a strictly non-mutating dry run; only --apply mutates.
 //   - The batch is bounded (default 5) with a code-level hard maximum; larger
 //     --limit values are deterministically clamped. Processing is sequential.
+//   - TASK-083: --recover-subscription-expired targets SUBSCRIPTION_EXPIRED
+//     mailboxes instead — provision through the same ensure seam, then a
+//     conditional flip back to ACTIVE. Without the flag that status is never
+//     touched.
 
 import { createLogger } from '@/lib/logger';
 import { runSubscriptionReconciliationOnce } from '@/services/microsoft/subscription-reconciliation.service';
@@ -32,18 +38,23 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { mode, limit, limitClamped } = parsed.options;
+  const { mode, limit, limitClamped, recoverSubscriptionExpired } = parsed.options;
   if (limitClamped) {
     logger.warn('Requested limit exceeds the hard maximum — clamped', { limit });
   }
 
   const deps = buildDefaultSubscriptionReconciliationDeps();
-  const result = await runSubscriptionReconciliationOnce(deps, { mode, limit });
+  const result = await runSubscriptionReconciliationOnce(deps, {
+    mode,
+    limit,
+    recoverSubscriptionExpired,
+  });
 
   // Sanitized summary only: counters + internal mailbox IDs, never email
   // addresses, tokens, or clientState.
   logger.info('Subscription reconciliation run completed', {
     mode: result.mode,
+    recoveryMode: result.recoveryMode,
     limit: result.limit,
     candidateCount: result.candidateCount,
     checkedCount: result.checkedCount,
@@ -54,6 +65,8 @@ async function main(): Promise<void> {
     transientFailureCount: result.transientFailureCount,
     failedCount: result.failedCount,
     disconnectRaceCount: result.disconnectRaceCount,
+    recoveredCount: result.recoveredCount,
+    skippedStateChangedCount: result.skippedStateChangedCount,
     aborted: result.aborted,
   });
   for (const record of result.outcomes) {

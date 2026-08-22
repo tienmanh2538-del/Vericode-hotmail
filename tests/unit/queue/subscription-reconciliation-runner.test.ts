@@ -191,6 +191,61 @@ describe('createPrismaReconciliationRepo', () => {
       data: { status: 'EXPIRED' },
     });
   });
+
+  it('TASK-083: recovery candidates use the same predicate pinned to SUBSCRIPTION_EXPIRED', async () => {
+    const client = fakePrismaClient();
+    const repo = createPrismaReconciliationRepo(client as never);
+
+    const candidates = await repo.listSubscriptionExpiredRecoveryCandidates(4, NOW);
+    expect(candidates).toEqual([{ mailboxId: 'mb-1' }, { mailboxId: 'mb-2' }]);
+    // Same locked filter as normal reconciliation — provider, credential,
+    // TASK-081 blocking definition — with ONLY the status pinned differently.
+    // No status union: ACTIVE / DISABLED / RECONNECT_REQUIRED can never match.
+    expect(client.mailbox.findMany).toHaveBeenCalledWith({
+      where: {
+        provider: 'MICROSOFT',
+        status: 'SUBSCRIPTION_EXPIRED',
+        encryptedRefreshToken: { not: null },
+        graphSubscriptions: {
+          none: {
+            status: { in: [...BLOCKING_SUBSCRIPTION_STATUSES] },
+            expirationDateTime: { gt: NOW },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: 4,
+      select: { id: true },
+    });
+  });
+
+  it('TASK-083: recovery conditional marks are pinned to SUBSCRIPTION_EXPIRED', async () => {
+    const client = fakePrismaClient();
+    const repo = createPrismaReconciliationRepo(client as never);
+
+    await expect(
+      repo.markMailboxReconnectRequiredIfSubscriptionExpired('mb-1'),
+    ).resolves.toBe(true);
+    expect(client.mailbox.updateMany).toHaveBeenCalledWith({
+      where: { id: 'mb-1', status: 'SUBSCRIPTION_EXPIRED' },
+      data: { status: 'RECONNECT_REQUIRED' },
+    });
+
+    await expect(repo.markMailboxActiveIfSubscriptionExpired('mb-2')).resolves.toBe(
+      true,
+    );
+    expect(client.mailbox.updateMany).toHaveBeenCalledWith({
+      where: { id: 'mb-2', status: 'SUBSCRIPTION_EXPIRED' },
+      data: { status: 'ACTIVE' },
+    });
+
+    // A concurrent state change (DISABLED / RECONNECT_REQUIRED / ACTIVE) means
+    // the conditional update matches nothing and reports false — no overwrite.
+    client.mailbox.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(repo.markMailboxActiveIfSubscriptionExpired('mb-3')).resolves.toBe(
+      false,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -292,9 +347,12 @@ function fakeServiceRepo(candidates: string[]) {
     listReconciliationCandidates: vi.fn(async (limit: number) =>
       candidates.slice(0, limit).map((mailboxId) => ({ mailboxId })),
     ),
+    listSubscriptionExpiredRecoveryCandidates: vi.fn(async () => []),
     getMailboxStatus: vi.fn(async () => 'ACTIVE'),
     hasBlockingSubscription: vi.fn(async () => false),
     markMailboxReconnectRequiredIfActive: vi.fn(async () => true),
+    markMailboxReconnectRequiredIfSubscriptionExpired: vi.fn(async () => true),
+    markMailboxActiveIfSubscriptionExpired: vi.fn(async () => true),
     markSubscriptionExpired: vi.fn(async () => undefined),
   };
 }
@@ -400,10 +458,15 @@ describe('reconciliation through the real renewal access-token port', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseReconciliationCliArgs', () => {
-  it('defaults to a dry run with the small bounded limit', () => {
+  it('defaults to a dry run with the small bounded limit and NO recovery mode', () => {
     expect(parseReconciliationCliArgs([])).toEqual({
       ok: true,
-      options: { mode: 'dry_run', limit: 5, limitClamped: false },
+      options: {
+        mode: 'dry_run',
+        limit: 5,
+        limitClamped: false,
+        recoverSubscriptionExpired: false,
+      },
     });
   });
 
@@ -411,7 +474,12 @@ describe('parseReconciliationCliArgs', () => {
     const parsed = parseReconciliationCliArgs(['--apply', '--limit', '3']);
     expect(parsed).toEqual({
       ok: true,
-      options: { mode: 'apply', limit: 3, limitClamped: false },
+      options: {
+        mode: 'apply',
+        limit: 3,
+        limitClamped: false,
+        recoverSubscriptionExpired: false,
+      },
     });
   });
 
@@ -423,6 +491,35 @@ describe('parseReconciliationCliArgs', () => {
         mode: 'dry_run',
         limit: MAX_RECONCILIATION_LIMIT,
         limitClamped: true,
+        recoverSubscriptionExpired: false,
+      },
+    });
+  });
+
+  it('TASK-083: recovery requires the explicit flag, and stays dry-run without --apply', () => {
+    const parsed = parseReconciliationCliArgs(['--recover-subscription-expired']);
+    expect(parsed).toEqual({
+      ok: true,
+      options: {
+        mode: 'dry_run',
+        limit: 5,
+        limitClamped: false,
+        recoverSubscriptionExpired: true,
+      },
+    });
+    const applied = parseReconciliationCliArgs([
+      '--recover-subscription-expired',
+      '--apply',
+      '--limit',
+      '2',
+    ]);
+    expect(applied).toEqual({
+      ok: true,
+      options: {
+        mode: 'apply',
+        limit: 2,
+        limitClamped: false,
+        recoverSubscriptionExpired: true,
       },
     });
   });
@@ -433,5 +530,6 @@ describe('parseReconciliationCliArgs', () => {
     expect(parseReconciliationCliArgs(['--limit']).ok).toBe(false);
     expect(parseReconciliationCliArgs(['--concurrency', '4']).ok).toBe(false);
     expect(parseReconciliationCliArgs(['--force']).ok).toBe(false);
+    expect(parseReconciliationCliArgs(['--recover']).ok).toBe(false);
   });
 });

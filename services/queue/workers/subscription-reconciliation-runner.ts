@@ -27,6 +27,7 @@ import {
 const MAILBOX_PROVIDER_MICROSOFT = 'MICROSOFT';
 const MAILBOX_STATUS_ACTIVE = 'ACTIVE';
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
+const MAILBOX_STATUS_SUBSCRIPTION_EXPIRED = 'SUBSCRIPTION_EXPIRED';
 const SUBSCRIPTION_STATUS_EXPIRED = 'EXPIRED';
 
 // ---------------------------------------------------------------------------
@@ -52,31 +53,51 @@ interface ReconciliationPrismaClient {
 export function createPrismaReconciliationRepo(
   client: ReconciliationPrismaClient = defaultPrisma as unknown as ReconciliationPrismaClient,
 ): SubscriptionReconciliationRepo {
+  // Shared candidate predicate: Microsoft provider, the given mailbox status,
+  // encrypted refresh credential present, and no potentially-live subscription
+  // per the TASK-081 blocking definition (reused, not redefined). Normal
+  // reconciliation and TASK-083 recovery differ ONLY in the pinned status —
+  // never a status union in one query.
+  async function listCandidatesWithStatus(
+    mailboxStatus: string,
+    limit: number,
+    now: Date,
+  ): Promise<ReconciliationCandidate[]> {
+    const rows = await client.mailbox.findMany({
+      where: {
+        provider: MAILBOX_PROVIDER_MICROSOFT,
+        status: mailboxStatus,
+        encryptedRefreshToken: { not: null },
+        graphSubscriptions: {
+          none: {
+            status: { in: [...BLOCKING_SUBSCRIPTION_STATUSES] },
+            expirationDateTime: { gt: now },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+      select: { id: true },
+    });
+    return rows.map((row) => ({ mailboxId: row.id }));
+  }
+
   return {
     async listReconciliationCandidates(
       limit: number,
       now: Date,
     ): Promise<ReconciliationCandidate[]> {
-      // Locked candidate filter: Microsoft provider, ACTIVE status, encrypted
-      // refresh credential present, and no potentially-live subscription per
-      // the TASK-081 blocking definition (reused, not redefined).
-      const rows = await client.mailbox.findMany({
-        where: {
-          provider: MAILBOX_PROVIDER_MICROSOFT,
-          status: MAILBOX_STATUS_ACTIVE,
-          encryptedRefreshToken: { not: null },
-          graphSubscriptions: {
-            none: {
-              status: { in: [...BLOCKING_SUBSCRIPTION_STATUSES] },
-              expirationDateTime: { gt: now },
-            },
-          },
-        },
-        orderBy: { createdAt: 'asc' },
-        take: limit,
-        select: { id: true },
-      });
-      return rows.map((row) => ({ mailboxId: row.id }));
+      return listCandidatesWithStatus(MAILBOX_STATUS_ACTIVE, limit, now);
+    },
+    async listSubscriptionExpiredRecoveryCandidates(
+      limit: number,
+      now: Date,
+    ): Promise<ReconciliationCandidate[]> {
+      return listCandidatesWithStatus(
+        MAILBOX_STATUS_SUBSCRIPTION_EXPIRED,
+        limit,
+        now,
+      );
     },
     async getMailboxStatus(mailboxId: string): Promise<string | null> {
       const row = await client.mailbox.findUnique({
@@ -102,6 +123,30 @@ export function createPrismaReconciliationRepo(
       const updated = await client.mailbox.updateMany({
         where: { id: mailboxId, status: MAILBOX_STATUS_ACTIVE },
         data: { status: MAILBOX_STATUS_RECONNECT_REQUIRED },
+      });
+      return updated.count > 0;
+    },
+    async markMailboxReconnectRequiredIfSubscriptionExpired(
+      mailboxId: string,
+    ): Promise<boolean> {
+      // TASK-083 — recovery variant of the conditional mark, pinned from
+      // SUBSCRIPTION_EXPIRED so no concurrently-written state is overwritten.
+      const updated = await client.mailbox.updateMany({
+        where: { id: mailboxId, status: MAILBOX_STATUS_SUBSCRIPTION_EXPIRED },
+        data: { status: MAILBOX_STATUS_RECONNECT_REQUIRED },
+      });
+      return updated.count > 0;
+    },
+    async markMailboxActiveIfSubscriptionExpired(
+      mailboxId: string,
+    ): Promise<boolean> {
+      // TASK-083 — the conditional recovery flip. ACTIVE is only ever the
+      // FINAL step after the ensure seam proved a usable subscription exists;
+      // the status condition guarantees a concurrent DISABLED /
+      // RECONNECT_REQUIRED / reconnect-ACTIVE write is never overwritten.
+      const updated = await client.mailbox.updateMany({
+        where: { id: mailboxId, status: MAILBOX_STATUS_SUBSCRIPTION_EXPIRED },
+        data: { status: MAILBOX_STATUS_ACTIVE },
       });
       return updated.count > 0;
     },
@@ -180,6 +225,8 @@ export interface ReconciliationCliOptions {
   mode: ReconciliationMode;
   limit: number;
   limitClamped: boolean;
+  /** TASK-083 — true only when the operator explicitly requested recovery. */
+  recoverSubscriptionExpired: boolean;
 }
 
 export type ReconciliationCliParseResult =
@@ -190,13 +237,16 @@ export type ReconciliationCliParseResult =
  * Parse the one-shot CLI arguments. Defaults to a dry run; only an explicit
  * `--apply` selects the mutating mode. `--limit <n>` accepts a positive
  * integer and is deterministically clamped to the code-level hard maximum.
- * There is intentionally NO concurrency option.
+ * `--recover-subscription-expired` (TASK-083) opts into the recovery mode for
+ * SUBSCRIPTION_EXPIRED mailboxes — absent, the run is plain TASK-082
+ * reconciliation. There is intentionally NO concurrency option.
  */
 export function parseReconciliationCliArgs(
   argv: string[],
 ): ReconciliationCliParseResult {
   let mode: ReconciliationMode = 'dry_run';
   let requestedLimit: number | undefined;
+  let recoverSubscriptionExpired = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -206,6 +256,10 @@ export function parseReconciliationCliArgs(
     }
     if (arg === '--dry-run') {
       // Explicit alias of the default, accepted for operator clarity.
+      continue;
+    }
+    if (arg === '--recover-subscription-expired') {
+      recoverSubscriptionExpired = true;
       continue;
     }
     if (arg === '--limit') {
@@ -226,7 +280,15 @@ export function parseReconciliationCliArgs(
 
   try {
     const { limit, clamped } = resolveReconciliationLimit(requestedLimit);
-    return { ok: true, options: { mode, limit, limitClamped: clamped } };
+    return {
+      ok: true,
+      options: {
+        mode,
+        limit,
+        limitClamped: clamped,
+        recoverSubscriptionExpired,
+      },
+    };
   } catch (error) {
     if (error instanceof ReconciliationValidationError) {
       return { ok: false, error: error.message };
