@@ -29,17 +29,21 @@ const { createPrismaAccessTokenPort, DeltaPollingTokenError } = await import(
 );
 
 function mailboxClient(encryptedRefreshToken: string | null) {
-  const update = vi.fn(
-    async (_args: { where: { id: string }; data: Record<string, unknown> }) => ({}),
+  // TASK-085 — rotation persistence is a conditional `updateMany` (CAS). Default
+  // to a CAS win (count 1) so the existing rotation assertions hold.
+  const updateMany = vi.fn(
+    async (_args: { where: Record<string, unknown>; data: Record<string, unknown> }) => ({
+      count: 1,
+    }),
   );
   return {
     client: {
       mailbox: {
         findUnique: vi.fn(async () => ({ encryptedRefreshToken })),
-        update,
+        updateMany,
       },
     },
-    update,
+    updateMany,
   };
 }
 
@@ -58,7 +62,7 @@ describe('createPrismaAccessTokenPort — token rotation (TASK-036)', () => {
     });
     encryptMock.mockReturnValue('enc(rotated-refresh-token)');
 
-    const { client, update } = mailboxClient('cipher-old');
+    const { client, updateMany } = mailboxClient('cipher-old');
     const port = createPrismaAccessTokenPort(client as never);
 
     const token = await port.getAccessTokenForMailbox({
@@ -69,19 +73,28 @@ describe('createPrismaAccessTokenPort — token rotation (TASK-036)', () => {
 
     expect(token).toBe('fresh-access-token');
     expect(encryptMock).toHaveBeenCalledWith('rotated-refresh-token');
-    expect(update).toHaveBeenCalledTimes(1);
-    const data = update.mock.calls[0][0].data as Record<string, unknown>;
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    const call = updateMany.mock.calls[0][0] as {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    };
     // The persisted value is exactly what encryptSecret returned — the rotated
     // token is encrypted before it touches the database, never stored raw.
-    expect(data.encryptedRefreshToken).toBe('enc(rotated-refresh-token)');
-    expect(data).toHaveProperty('tokenLastRefreshedAt');
+    expect(call.data.encryptedRefreshToken).toBe('enc(rotated-refresh-token)');
+    expect(call.data).toHaveProperty('tokenLastRefreshedAt');
+    // TASK-085 — CAS predicate: not DISABLED AND the exact read generation (G0).
+    expect(call.where).toEqual({
+      id: 'mb_1',
+      status: { not: 'DISABLED' },
+      encryptedRefreshToken: 'cipher-old',
+    });
   });
 
   it('does NOT overwrite the stored token when Microsoft returns no new refresh token', async () => {
     decryptMock.mockReturnValue('old-plaintext-refresh');
     refreshMock.mockResolvedValue({ accessToken: 'fresh-access-token' });
 
-    const { client, update } = mailboxClient('cipher-old');
+    const { client, updateMany } = mailboxClient('cipher-old');
     const port = createPrismaAccessTokenPort(client as never);
 
     const token = await port.getAccessTokenForMailbox({
@@ -92,7 +105,7 @@ describe('createPrismaAccessTokenPort — token rotation (TASK-036)', () => {
 
     expect(token).toBe('fresh-access-token');
     expect(encryptMock).not.toHaveBeenCalled();
-    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it('maps a missing refresh token to a token error and never calls refresh', async () => {

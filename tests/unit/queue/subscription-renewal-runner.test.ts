@@ -36,7 +36,9 @@ function mailboxClient(encryptedRefreshToken: string | null) {
   return {
     mailbox: {
       findUnique: vi.fn(async () => ({ encryptedRefreshToken })),
-      update: vi.fn(async () => ({})),
+      // TASK-085 — rotation persistence is a conditional `updateMany` (CAS). By
+      // default the CAS wins (count 1) so rotation-persist tests behave as before.
+      updateMany: vi.fn(async () => ({ count: 1 })),
     },
   };
 }
@@ -60,7 +62,8 @@ describe('createPrismaRenewalAccessTokenPort (string)', () => {
 
     await expect(port.getAccessTokenForMailbox('mb_1')).resolves.toBe('fresh-access-token');
     expect(decryptMock).toHaveBeenCalledWith('cipher');
-    expect(client.mailbox.update).not.toHaveBeenCalled();
+    // No rotation returned → no credential DB write at all.
+    expect(client.mailbox.updateMany).not.toHaveBeenCalled();
   });
 
   it('maps a missing refresh token to reconnect_required', async () => {
@@ -139,9 +142,66 @@ describe('createPrismaRenewalAccessTokenPortWithGeneration', () => {
 
     const credential = await port.getAccessTokenForMailbox('mb_1');
     expect(credential.accessToken).toBe('fresh-access-token');
-    // Case B — the generation the operation committed to is the rotated value.
+    // Case B — the generation the operation committed to is the rotated value
+    // (CAS won, count 1).
     expect(credential.credentialGeneration).toBe('cipher-A-prime');
-    expect(client.mailbox.update).toHaveBeenCalledTimes(1);
+    expect(client.mailbox.updateMany).toHaveBeenCalledTimes(1);
+    // TASK-085 — the rotation write is a CAS on the exact read generation (G0)
+    // and status != DISABLED.
+    const arg = (
+      (client.mailbox.updateMany as ReturnType<typeof vi.fn>).mock
+        .calls[0] as unknown as unknown[]
+    )[0] as { where: Record<string, unknown> };
+    expect(arg.where).toEqual({
+      id: 'mb_1',
+      status: { not: 'DISABLED' },
+      encryptedRefreshToken: 'cipher-A',
+    });
+  });
+
+  it('TASK-085 Case B — on CAS loss the generation falls back to the read G0 (not the rotated value)', async () => {
+    decryptMock.mockReturnValue('plaintext-refresh');
+    refreshMock.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      refreshToken: 'rotated-refresh',
+    });
+    encryptMock.mockReturnValue('cipher-A-prime');
+    // CAS loses (generation already changed / mailbox disabled) → count 0.
+    const client = mailboxClient('cipher-A');
+    client.mailbox.updateMany = vi.fn(async () => ({ count: 0 }));
+    const port = createPrismaRenewalAccessTokenPortWithGeneration(client as never);
+
+    const credential = await port.getAccessTokenForMailbox('mb_1');
+    // Access token this cycle is still returned (non-fatal), but the committed
+    // generation is NOT the CAS-lost rotated value — it falls back to the read G0
+    // so the TASK-084 status guard fails closed against the newer stored value.
+    expect(credential.accessToken).toBe('fresh-access-token');
+    expect(credential.credentialGeneration).toBe('cipher-A');
+  });
+
+  it('TASK-085 — a DB error while persisting rotation surfaces as TRANSIENT, never reconnect', async () => {
+    decryptMock.mockReturnValue('plaintext-refresh');
+    refreshMock.mockResolvedValue({
+      accessToken: 'fresh-access-token',
+      refreshToken: 'rotated-refresh',
+    });
+    encryptMock.mockReturnValue('cipher-A-prime');
+    const client = mailboxClient('cipher-A');
+    // A real DB/infra error during the CAS write (distinct from count 0).
+    client.mailbox.updateMany = vi.fn(async () => {
+      throw new Error('db down: cipher-A-prime must not leak');
+    });
+    const port = createPrismaRenewalAccessTokenPortWithGeneration(client as never);
+
+    const error = await port.getAccessTokenForMailbox('mb_1').catch((e) => e);
+    // The DB error propagated and the caller classified it TRANSIENT (retry next
+    // tick) — NOT reconnect_required, NOT an auth failure, NOT a silent success.
+    expect(error).toBeInstanceOf(SubscriptionRenewalTokenError);
+    expect(error.kind).toBe('transient');
+    expect(error.kind).not.toBe('reconnect_required');
+    // The raw DB message / ciphertext never rides along on the token error.
+    expect(String(error.message)).not.toContain('cipher-A-prime');
+    expect(error.credentialGeneration).toBeNull();
   });
 
   it('carries null generation when the mailbox has no stored credential', async () => {

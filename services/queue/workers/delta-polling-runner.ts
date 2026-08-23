@@ -159,7 +159,9 @@ interface MailboxRefreshTokenSlice {
 interface MailboxRefreshTokenPrismaClient {
   mailbox: {
     findUnique: (args: unknown) => Promise<MailboxRefreshTokenSlice | null>;
-    update: (args: unknown) => Promise<unknown>;
+    // TASK-085 — rotation persistence writes via a conditional `updateMany`
+    // (credential-generation CAS) inside `persistRotatedRefreshToken`.
+    updateMany: (args: unknown) => Promise<{ count: number }>;
   };
 }
 
@@ -198,9 +200,12 @@ export function createPrismaAccessTokenPort(
           'reconnect_required',
         );
       }
+      // TASK-085 — the exact stored generation this operation starts from (G0),
+      // used as the credential-generation CAS predicate on persist below.
+      const expectedGeneration = row.encryptedRefreshToken;
       let plaintextRefreshToken: string;
       try {
-        plaintextRefreshToken = decryptSecret(row.encryptedRefreshToken);
+        plaintextRefreshToken = decryptSecret(expectedGeneration);
       } catch {
         // Never include the underlying error message — it may leak ciphertext
         // or key context. The stored token is unusable → reconnect required.
@@ -231,9 +236,15 @@ export function createPrismaAccessTokenPort(
       // TASK-036 — Microsoft may rotate the refresh token. Persist the new
       // (encrypted) token so the next refresh does not fail with invalid_grant.
       // When no new token is returned, the existing one is kept untouched.
-      await persistRotatedRefreshToken(mailbox.id, exchanged.refreshToken, {
-        prisma: client,
-      });
+      // TASK-085 — under credential-generation CAS: a stale/late rotation that
+      // races another worker / OAuth reconnect / disconnect simply does not commit
+      // (count 0); the access token this cycle is still returned and used.
+      await persistRotatedRefreshToken(
+        mailbox.id,
+        exchanged.refreshToken,
+        expectedGeneration,
+        { prisma: client },
+      );
       return exchanged.accessToken;
     },
   };

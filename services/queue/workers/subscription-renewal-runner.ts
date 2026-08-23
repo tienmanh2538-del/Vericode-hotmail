@@ -311,10 +311,12 @@ interface MailboxRefreshTokenSlice {
 interface MailboxRefreshTokenPrismaClient {
   mailbox: {
     findUnique: (args: unknown) => Promise<MailboxRefreshTokenSlice | null>;
-    update: (args: {
-      where: { id: string };
+    // TASK-085 — rotation persistence now writes via a conditional `updateMany`
+    // (credential-generation CAS) inside `persistRotatedRefreshToken`.
+    updateMany: (args: {
+      where: Record<string, unknown>;
       data: Record<string, unknown>;
-    }) => Promise<unknown>;
+    }) => Promise<{ count: number }>;
   };
 }
 
@@ -375,11 +377,17 @@ async function acquireRenewalCredential(
     });
     // TASK-036 — persist a rotated refresh token (encrypted) so renewal does not
     // silently lose mailbox access on the next cycle. No-op when Microsoft did
-    // not return a new token. TASK-084 — capture the post-rotation generation
-    // (the value the operation committed to) for the Case B reconnect guard.
+    // not return a new token. TASK-085 — the write is a credential-generation CAS
+    // guarded by `initialGeneration` (G0): a stale/late rotation cannot overwrite
+    // a newer credential or a DISABLED mailbox. TASK-084 Case B — the committed
+    // generation is used for the reconnect guard ONLY when it was persisted; on a
+    // CAS loss the helper returns no ciphertext, so we fall back to G0 (the
+    // credential this operation actually used), which fails the status guard
+    // closed against the newer stored generation.
     const persistResult = await persistRotatedRefreshToken(
       mailboxId,
       exchanged.refreshToken,
+      initialGeneration,
       { prisma: client },
     );
     const credentialGeneration =

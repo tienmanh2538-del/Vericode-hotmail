@@ -194,7 +194,9 @@ interface MailboxRefreshTokenRow {
 interface MailboxRefreshTokenPrismaClient {
   mailbox: {
     findUnique: (args: unknown) => Promise<MailboxRefreshTokenRow | null>;
-    update: (args: unknown) => Promise<unknown>;
+    // TASK-085 — rotation persistence writes via a conditional `updateMany`
+    // (credential-generation CAS) inside `persistRotatedRefreshToken`.
+    updateMany: (args: unknown) => Promise<{ count: number }>;
   };
 }
 
@@ -233,9 +235,12 @@ export function createPrismaEmailAccessTokenPort(
           'reconnect_required',
         );
       }
+      // TASK-085 — the exact stored generation this operation starts from (G0),
+      // used as the credential-generation CAS predicate on persist below.
+      const expectedGeneration = row.encryptedRefreshToken;
       let plaintextRefreshToken: string;
       try {
-        plaintextRefreshToken = decryptSecret(row.encryptedRefreshToken);
+        plaintextRefreshToken = decryptSecret(expectedGeneration);
       } catch {
         // Never include the underlying error — it may leak ciphertext/key context.
         // The stored token is unusable for this mailbox → reconnect required.
@@ -261,9 +266,15 @@ export function createPrismaEmailAccessTokenPort(
       // token so the next cycle does not fail with invalid_grant. No-op when no
       // new token is returned (the existing one is kept). Same contract as the
       // delta-polling and subscription-renewal workers.
-      await persistRotatedRefreshToken(mailbox.id, exchanged.refreshToken, {
-        prisma: client,
-      });
+      // TASK-085 — under credential-generation CAS: a stale/late rotation racing
+      // another worker / OAuth reconnect / disconnect does not commit (count 0);
+      // the access token this cycle is still returned and used.
+      await persistRotatedRefreshToken(
+        mailbox.id,
+        exchanged.refreshToken,
+        expectedGeneration,
+        { prisma: client },
+      );
       return exchanged.accessToken;
     },
   };

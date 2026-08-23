@@ -96,7 +96,8 @@ describe('reconciliation apply with a hanging Microsoft token endpoint', () => {
     const tokenClient = {
       mailbox: {
         findUnique: vi.fn(async () => ({ encryptedRefreshToken: 'cipher' })),
-        update: vi.fn(async () => ({})),
+        // TASK-085 — rotation persistence is a conditional `updateMany` (CAS win).
+        updateMany: vi.fn(async () => ({ count: 1 })),
       },
     };
     const port = createPrismaRenewalAccessTokenPort(tokenClient as never, {
@@ -142,10 +143,16 @@ describe('reconciliation apply with a hanging Microsoft token endpoint', () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
-    // The independent next mailbox completed AND its rotated refresh
-    // credential was persisted encrypted-at-rest.
-    expect(tokenClient.mailbox.update).toHaveBeenCalledWith(
+    // The independent next mailbox completed AND its rotated refresh credential
+    // was persisted encrypted-at-rest under the TASK-085 CAS (not DISABLED AND
+    // expected generation G0).
+    expect(tokenClient.mailbox.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: {
+          id: 'mb-2',
+          status: { not: 'DISABLED' },
+          encryptedRefreshToken: 'cipher',
+        },
         data: expect.objectContaining({
           encryptedRefreshToken: 'enc(rotated-refresh)',
         }),

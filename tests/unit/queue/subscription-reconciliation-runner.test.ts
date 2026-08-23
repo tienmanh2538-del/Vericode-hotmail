@@ -375,7 +375,8 @@ describe('reconciliation through the real renewal access-token port', () => {
     const tokenClient = {
       mailbox: {
         findUnique: vi.fn(async () => ({ encryptedRefreshToken: 'cipher' })),
-        update: vi.fn(async () => ({})),
+        // TASK-085 — rotation persistence is a conditional `updateMany` (CAS win).
+        updateMany: vi.fn(async () => ({ count: 1 })),
       },
     };
     const port = renewalRunnerActual.createPrismaRenewalAccessTokenPort(
@@ -404,10 +405,16 @@ describe('reconciliation through the real renewal access-token port', () => {
       mailboxId: 'mb-1',
       accessToken: 'minted-token-value',
     });
-    // Rotated refresh credential is persisted encrypted-at-rest (TASK-036).
+    // Rotated refresh credential is persisted encrypted-at-rest (TASK-036) under
+    // the TASK-085 credential-generation CAS (status != DISABLED AND expected G0).
     expect(encryptMock).toHaveBeenCalledWith('rotated-refresh');
-    expect(tokenClient.mailbox.update).toHaveBeenCalledWith(
+    expect(tokenClient.mailbox.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: {
+          id: 'mb-1',
+          status: { not: 'DISABLED' },
+          encryptedRefreshToken: 'cipher',
+        },
         data: expect.objectContaining({
           encryptedRefreshToken: 'enc(rotated-refresh)',
         }),

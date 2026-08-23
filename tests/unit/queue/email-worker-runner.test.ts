@@ -21,11 +21,13 @@ vi.mock('@/lib/security/encryption', () => ({
 }));
 
 vi.mock('@/services/microsoft/refresh-token-rotation.service', () => ({
+  // TASK-085 — signature is now (mailboxId, token, expectedGeneration, deps).
   persistRotatedRefreshToken: (
     mailboxId: string,
     token: string | undefined,
+    expectedGeneration: string | null,
     deps: unknown,
-  ) => persistRotatedMock(mailboxId, token, deps),
+  ) => persistRotatedMock(mailboxId, token, expectedGeneration, deps),
 }));
 
 import { RefreshAccessTokenError } from '@/services/microsoft/refresh-access-token.service';
@@ -106,8 +108,9 @@ describe('createPrismaEmailAccessTokenPort — token rotation', () => {
     expect(token).toBe('AT');
     expect(decryptMock).toHaveBeenCalledWith('cipher');
     expect(refreshMock).toHaveBeenCalledWith('plain-refresh');
-    // The worker uses the SAME rotation helper as delta-polling / renewal.
-    expect(persistRotatedMock).toHaveBeenCalledWith('mb1', 'new-RT', {
+    // The worker uses the SAME rotation helper as delta-polling / renewal, now
+    // passing the read generation (G0) as the CAS expected generation (TASK-085).
+    expect(persistRotatedMock).toHaveBeenCalledWith('mb1', 'new-RT', 'cipher', {
       prisma: client,
     });
   });
@@ -125,7 +128,7 @@ describe('createPrismaEmailAccessTokenPort — token rotation', () => {
     });
 
     // undefined ⇒ rotation helper keeps the existing token (no overwrite).
-    expect(persistRotatedMock).toHaveBeenCalledWith('mb1', undefined, {
+    expect(persistRotatedMock).toHaveBeenCalledWith('mb1', undefined, 'cipher', {
       prisma: client,
     });
   });
