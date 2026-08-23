@@ -19,13 +19,28 @@ import {
 // Fakes
 // ---------------------------------------------------------------------------
 
+// TASK-084 — a stable claim generation the fake hands back from claimForRenewal
+// and expects on every subsequent CAS completion.
+const FAKE_CLAIM_GENERATION = new Date('2026-05-29T09:59:59.000Z');
+
 interface FakeRepoState {
   candidates: RenewableSubscriptionCandidate[];
   expiredSubscriptions: string[];
   failedSubscriptions: string[];
   reconnectMailboxes: string[];
   expiredMailboxes: string[];
+  renewedSubscriptions: string[];
+  claimedSubscriptions: string[];
+  // Args captured for correction-A/B assertions.
+  reconnectCredentialGenerations: Array<string | null>;
+  expiredFailingRowIds: string[];
   listImpl?: () => Promise<RenewableSubscriptionCandidate[]>;
+  // Behaviour knobs (default = current claim owner + writes succeed).
+  claimImpl?: (subscriptionId: string) => import('@/services/microsoft/subscription-renewal.service').SubscriptionClaim;
+  ownsClaim?: boolean;
+  mailboxSubscriptionExpiredResult?: boolean;
+  mailboxReconnectResult?: boolean;
+  casThrows?: boolean;
 }
 
 function createFakeRepo(initial: RenewableSubscriptionCandidate[]): {
@@ -38,30 +53,73 @@ function createFakeRepo(initial: RenewableSubscriptionCandidate[]): {
     failedSubscriptions: [],
     reconnectMailboxes: [],
     expiredMailboxes: [],
+    renewedSubscriptions: [],
+    claimedSubscriptions: [],
+    reconnectCredentialGenerations: [],
+    expiredFailingRowIds: [],
   };
+  const owns = (): boolean => state.ownsClaim ?? true;
   const repo: SubscriptionRenewalRepo = {
     async listRenewableCandidates() {
       if (state.listImpl) return state.listImpl();
       return state.candidates;
     },
-    async markSubscriptionExpired(subscriptionId) {
-      state.expiredSubscriptions.push(subscriptionId);
+    async claimForRenewal(subscriptionId) {
+      state.claimedSubscriptions.push(subscriptionId);
+      if (state.claimImpl) return state.claimImpl(subscriptionId);
+      return {
+        claimed: true,
+        claimGeneration: FAKE_CLAIM_GENERATION,
+        reclaimedStale: false,
+      };
     },
-    async markSubscriptionFailed(subscriptionId) {
+    async markRenewedIfOwner({ subscriptionId }) {
+      if (state.casThrows) throw new Error('db down');
+      if (!owns()) return false;
+      state.renewedSubscriptions.push(subscriptionId);
+      return true;
+    },
+    async markSubscriptionFailedIfOwner(subscriptionId) {
+      if (state.casThrows) throw new Error('db down');
+      if (!owns()) return false;
       state.failedSubscriptions.push(subscriptionId);
+      return true;
     },
-    async markMailboxReconnectRequired(mailboxId) {
-      state.reconnectMailboxes.push(mailboxId);
+    async markSubscriptionExpiredIfOwner(subscriptionId) {
+      if (state.casThrows) throw new Error('db down');
+      if (!owns()) return false;
+      state.expiredSubscriptions.push(subscriptionId);
+      return true;
     },
-    async markMailboxSubscriptionExpired(mailboxId) {
-      state.expiredMailboxes.push(mailboxId);
+    async markMailboxSubscriptionExpiredIfNoOtherLiveSubscription({
+      mailboxId,
+      failingSubscriptionRowId,
+    }) {
+      state.expiredFailingRowIds.push(failingSubscriptionRowId);
+      const result = state.mailboxSubscriptionExpiredResult ?? true;
+      if (result) state.expiredMailboxes.push(mailboxId);
+      return result;
+    },
+    async markMailboxReconnectRequiredIfCredentialCurrent(
+      mailboxId,
+      credentialGeneration,
+    ) {
+      state.reconnectCredentialGenerations.push(credentialGeneration);
+      const result = state.mailboxReconnectResult ?? true;
+      if (result) state.reconnectMailboxes.push(mailboxId);
+      return result;
     },
   };
   return { repo, state };
 }
 
+type FakeCredentialEntry =
+  | string
+  | { accessToken: string; credentialGeneration: string | null }
+  | (() => Promise<{ accessToken: string; credentialGeneration: string | null }>);
+
 function createFakeAccessToken(
-  tokenByMailboxId: Record<string, string | (() => Promise<string>)>,
+  tokenByMailboxId: Record<string, FakeCredentialEntry>,
 ): RenewalAccessTokenPort {
   return {
     async getAccessTokenForMailbox(mailboxId) {
@@ -70,6 +128,9 @@ function createFakeAccessToken(
         throw new Error(`no token configured for mailbox ${mailboxId}`);
       }
       if (typeof entry === 'function') return entry();
+      if (typeof entry === 'string') {
+        return { accessToken: entry, credentialGeneration: null };
+      }
       return entry;
     },
   };
@@ -448,7 +509,240 @@ describe('runSubscriptionRenewalOnce — transient errors', () => {
       failedCount: 0,
       reconnectRequiredCount: 0,
       expiredCount: 0,
+      claimLostCount: 0,
+      staleReclaimedCount: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-084 — atomic claim + CAS ownership orchestration
+// ---------------------------------------------------------------------------
+
+describe('runSubscriptionRenewalOnce — claim + CAS ownership (TASK-084)', () => {
+  const due = () =>
+    candidate({ expirationDateTime: new Date(FIXED_NOW.getTime() + HOURS) });
+
+  it('claims before acquiring a token, and skips renew when the claim is lost', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.claimImpl = () => ({
+      claimed: false,
+      claimGeneration: null,
+      reclaimedStale: false,
+    });
+    const renew = vi.fn();
+    const getAccessTokenForMailbox = vi.fn(async () => ({
+      accessToken: 'token',
+      credentialGeneration: null,
+    }));
+
+    const result = await runSubscriptionRenewalOnce(
+      baseDeps(repo, { renew: { renew }, accessToken: { getAccessTokenForMailbox } }),
+    );
+
+    expect(result.claimLostCount).toBe(1);
+    expect(result.renewedCount).toBe(0);
+    // Lost claim → no token, no PATCH, zero mailbox side effects.
+    expect(getAccessTokenForMailbox).not.toHaveBeenCalled();
+    expect(renew).not.toHaveBeenCalled();
+    expect(state.reconnectMailboxes).toEqual([]);
+    expect(state.expiredMailboxes).toEqual([]);
+    expect(state.renewedSubscriptions).toEqual([]);
+  });
+
+  it('stale-reclaim race — a resumed worker that lost its generation applies zero side effects', async () => {
+    // Worker A claimed generation A, stalled past the 30-min cutoff; Worker B
+    // stale-reclaimed (generation B). When A resumes, its claim can no longer be
+    // established (the repo's hijack guard returns claimed=false) — A must not
+    // acquire a token, PATCH, complete, or touch the mailbox in any way.
+    const { repo, state } = createFakeRepo([due()]);
+    state.claimImpl = () => ({
+      claimed: false,
+      claimGeneration: null,
+      reclaimedStale: false,
+    });
+    const getAccessTokenForMailbox = vi.fn();
+    const renew = vi.fn();
+
+    const result = await runSubscriptionRenewalOnce(
+      baseDeps(repo, { renew: { renew }, accessToken: { getAccessTokenForMailbox } }),
+    );
+
+    expect(result.claimLostCount).toBe(1);
+    expect(getAccessTokenForMailbox).not.toHaveBeenCalled();
+    expect(renew).not.toHaveBeenCalled();
+    expect(state.renewedSubscriptions).toEqual([]);
+    expect(state.failedSubscriptions).toEqual([]);
+    expect(state.expiredSubscriptions).toEqual([]);
+    expect(state.reconnectMailboxes).toEqual([]);
+    expect(state.expiredMailboxes).toEqual([]);
+  });
+
+  it('counts a stale reclaim in staleReclaimedCount', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.claimImpl = () => ({
+      claimed: true,
+      claimGeneration: FAKE_CLAIM_GENERATION,
+      reclaimedStale: true,
+    });
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo));
+    expect(result.staleReclaimedCount).toBe(1);
+    expect(result.renewedCount).toBe(1);
+    expect(state.claimedSubscriptions).toEqual(['sub_1']);
+  });
+
+  it('does not overwrite a newer state when the success CAS finds ownership lost', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.ownsClaim = false; // markRenewedIfOwner → count 0
+    const recordRenewed = vi.fn();
+
+    const result = await runSubscriptionRenewalOnce(
+      baseDeps(repo, { audit: { recordRenewed } }),
+    );
+
+    expect(result.claimLostCount).toBe(1);
+    expect(result.renewedCount).toBe(0);
+    expect(state.renewedSubscriptions).toEqual([]);
+    // No audit entry is written for a lost claim.
+    expect(recordRenewed).not.toHaveBeenCalled();
+  });
+
+  it('CORRECTION A — a lost completion CAS applies ZERO mailbox side effect (404/410)', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.ownsClaim = false; // markSubscriptionExpiredIfOwner → count 0
+    const renew = vi.fn(async () => {
+      throw { kind: 'not_found', httpStatus: 404 };
+    });
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo, { renew: { renew } }));
+
+    expect(result.expiredCount).toBe(1);
+    // Ownership lost at STEP 1 → the relation-aware mailbox writer never runs.
+    expect(state.expiredMailboxes).toEqual([]);
+    expect(state.expiredFailingRowIds).toEqual([]);
+  });
+
+  it('CORRECTION A — a throwing completion CAS applies ZERO mailbox side effect', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.casThrows = true; // markSubscriptionExpiredIfOwner throws (DB error)
+    const renew = vi.fn(async () => {
+      throw { kind: 'not_found', httpStatus: 410 };
+    });
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo, { renew: { renew } }));
+
+    expect(result.expiredCount).toBe(1);
+    expect(state.expiredMailboxes).toEqual([]);
+    expect(state.expiredFailingRowIds).toEqual([]);
+  });
+
+  it('passes the failing subscription row id to the relation-aware expired writer', async () => {
+    const c = candidate({
+      id: 'gs_row_1',
+      expirationDateTime: new Date(FIXED_NOW.getTime() - HOURS),
+    });
+    const { repo, state } = createFakeRepo([c]);
+    await runSubscriptionRenewalOnce(baseDeps(repo));
+    expect(state.expiredFailingRowIds).toEqual(['gs_row_1']);
+    expect(state.expiredMailboxes).toEqual(['mb_1']);
+  });
+
+  it('keeps the mailbox ACTIVE when a replacement subscription blocks the expired writer', async () => {
+    const { repo, state } = createFakeRepo([
+      candidate({ expirationDateTime: new Date(FIXED_NOW.getTime() - HOURS) }),
+    ]);
+    // Relation predicate did not match (a live replacement exists) → no transition.
+    state.mailboxSubscriptionExpiredResult = false;
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo));
+
+    expect(result.expiredCount).toBe(1);
+    // STEP 1 still owned the row, but STEP 2 left the mailbox untouched.
+    expect(state.expiredSubscriptions).toEqual(['sub_1']);
+    expect(state.expiredMailboxes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-084 — credential-generation guard (correction B), Case A and Case B
+// ---------------------------------------------------------------------------
+
+describe('runSubscriptionRenewalOnce — credential-generation reconnect guard', () => {
+  const due = () =>
+    candidate({ expirationDateTime: new Date(FIXED_NOW.getTime() + HOURS) });
+
+  it('Case A — uses the credential generation carried by the token error', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    const accessToken: RenewalAccessTokenPort = {
+      getAccessTokenForMailbox: vi.fn(async () => {
+        throw new SubscriptionRenewalTokenError(
+          'reconnect_required',
+          'revoked',
+          'cipher-A',
+        );
+      }),
+    };
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo, { accessToken }));
+
+    expect(result.reconnectRequiredCount).toBe(1);
+    expect(state.reconnectMailboxes).toEqual(['mb_1']);
+    // The guard receives exactly the generation the operation started with.
+    expect(state.reconnectCredentialGenerations).toEqual(['cipher-A']);
+  });
+
+  it('Case B — uses the post-acquisition credential generation on a Graph 401', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    const accessToken = createFakeAccessToken({
+      mb_1: { accessToken: 'token', credentialGeneration: 'cipher-A-prime' },
+    });
+    const renew = vi.fn(async () => {
+      throw { kind: 'auth', httpStatus: 401 };
+    });
+
+    const result = await runSubscriptionRenewalOnce(
+      baseDeps(repo, { accessToken, renew: { renew } }),
+    );
+
+    expect(result.reconnectRequiredCount).toBe(1);
+    expect(state.reconnectCredentialGenerations).toEqual(['cipher-A-prime']);
+  });
+
+  it('does not mark the mailbox when the credential generation changed concurrently', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    // Writer predicate misses (a concurrent OAuth reconnect wrote a new credential).
+    state.mailboxReconnectResult = false;
+    const accessToken: RenewalAccessTokenPort = {
+      getAccessTokenForMailbox: vi.fn(async () => {
+        throw new SubscriptionRenewalTokenError(
+          'reconnect_required',
+          'revoked',
+          'stale-cipher',
+        );
+      }),
+    };
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo, { accessToken }));
+
+    // Outcome is still reconnect_required, but the freshly reconnected mailbox
+    // was NOT overwritten.
+    expect(result.reconnectRequiredCount).toBe(1);
+    expect(state.reconnectMailboxes).toEqual([]);
+  });
+
+  it('CORRECTION A — a lost claim blocks the reconnect writer entirely (Case B)', async () => {
+    const { repo, state } = createFakeRepo([due()]);
+    state.ownsClaim = false; // markSubscriptionFailedIfOwner → count 0
+    const renew = vi.fn(async () => {
+      throw { kind: 'auth', httpStatus: 401 };
+    });
+
+    const result = await runSubscriptionRenewalOnce(baseDeps(repo, { renew: { renew } }));
+
+    expect(result.reconnectRequiredCount).toBe(1);
+    // Ownership lost → the credential guard is never even consulted.
+    expect(state.reconnectMailboxes).toEqual([]);
+    expect(state.reconnectCredentialGenerations).toEqual([]);
   });
 });
 

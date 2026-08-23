@@ -588,8 +588,8 @@ describe('createInboxSubscription — secret hygiene', () => {
 // renewGraphSubscription
 // ---------------------------------------------------------------------------
 
-describe('renewGraphSubscription', () => {
-  it('PATCHes the subscription with a new expirationDateTime and updates DB', async () => {
+describe('renewGraphSubscription (TASK-084 — thin PATCH adapter, no DB writes)', () => {
+  it('PATCHes the subscription and returns the remote expiration without touching the DB', async () => {
     const { prisma, store } = createFakePrisma();
     store.push({
       id: 'sub_seed',
@@ -629,15 +629,17 @@ describe('renewGraphSubscription', () => {
     const body = JSON.parse(init.body as string);
     expect(typeof body.expirationDateTime).toBe('string');
 
-    expect(result.status).toBe('ACTIVE');
+    // Returns the parsed remote expiration; ownership/state persistence is the
+    // renewal repository layer's job now (CAS), so the DB row is left untouched.
+    expect(result).toEqual({
+      subscriptionId: 'graph-sub-renew',
+      expirationDateTime: new Date('2026-06-04T00:00:00.000Z'),
+    });
     expect(store[0].status).toBe('ACTIVE');
-    expect(store[0].lastRenewedAt).toEqual(now);
-    expect(store[0].expirationDateTime.toISOString()).toBe(
-      '2026-06-04T00:00:00.000Z',
-    );
+    expect(store[0].lastRenewedAt).toBeNull();
   });
 
-  it('marks the subscription FAILED when Graph rejects the renew', async () => {
+  it('propagates the classified Graph error without writing FAILED locally', async () => {
     const { prisma, store } = createFakePrisma();
     store.push({
       id: 'sub_seed_fail',
@@ -663,7 +665,9 @@ describe('renewGraphSubscription', () => {
       ),
     ).rejects.toMatchObject({ kind: 'auth' });
 
-    expect(store[0].status).toBe('FAILED');
+    // No local FAILED write — the service classifies the error and applies the
+    // CAS completion instead.
+    expect(store[0].status).toBe('ACTIVE');
   });
 });
 

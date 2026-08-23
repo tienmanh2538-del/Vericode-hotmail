@@ -30,8 +30,6 @@ const CLIENT_STATE_BYTES = 48;
 const CLIENT_STATE_MAX_LENGTH = 128;
 
 const ACTIVE_STATUS: GraphSubscriptionStatus = 'ACTIVE';
-const RENEWING_STATUS: GraphSubscriptionStatus = 'RENEWING';
-const FAILED_STATUS: GraphSubscriptionStatus = 'FAILED';
 const EXPIRED_STATUS: GraphSubscriptionStatus = 'EXPIRED';
 
 // -----------------------------------------------------------------------------
@@ -545,11 +543,25 @@ export async function createInboxSubscription(
   };
 }
 
+// TASK-084 — narrow Graph PATCH adapter for the renewal path.
+//
+// Ownership/state persistence (RENEWING claim, ACTIVE/FAILED/EXPIRED completion)
+// now lives in the renewal repository layer behind atomic claim + CAS, so this
+// function is deliberately a THIN Graph operation: it performs the PATCH and
+// parses the remote expiration only. It never touches the database — a stale
+// worker must not be able to write local subscription state from here and defeat
+// the CAS ownership guard. The single renewal caller does all persistence with
+// affected-count checks after this returns.
+export interface RenewGraphSubscriptionResult {
+  subscriptionId: string;
+  /** The expiration Microsoft echoed back (or the requested one as a fallback). */
+  expirationDateTime: Date;
+}
+
 export async function renewGraphSubscription(
   input: RenewGraphSubscriptionInput,
   deps: GraphSubscriptionDeps = {},
-): Promise<GraphSubscriptionResult> {
-  const mailboxId = requireNonEmpty(input.mailboxId, 'mailboxId');
+): Promise<RenewGraphSubscriptionResult> {
   const subscriptionId = requireNonEmpty(input.subscriptionId, 'subscriptionId');
   const accessToken = requireAccessToken(input.accessToken);
 
@@ -560,49 +572,21 @@ export async function renewGraphSubscription(
   );
 
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const prisma = deps.prisma ?? (defaultPrisma as unknown as PrismaClientLike);
-
-  // Flag the row as RENEWING so concurrent workers do not race to renew the
-  // same subscription. Failure to mark is non-fatal — the PATCH is still safe.
-  try {
-    await prisma.graphSubscription.update({
-      where: { subscriptionId },
-      data: { status: RENEWING_STATUS },
-    });
-  } catch {
-    logger.warn('Could not mark subscription as RENEWING before patch', {
-      mailboxId,
-      subscriptionId,
-    });
-  }
 
   const url = `${GRAPH_BASE_URL}${SUBSCRIPTIONS_PATH}/${encodeURIComponent(subscriptionId)}`;
-  let responsePayload: unknown;
-  try {
-    const result = await performGraphRequest({
-      method: 'PATCH',
-      url,
-      accessToken,
-      body: { expirationDateTime: expirationDateTime.toISOString() },
-      fetchImpl,
-      operationLabel: 'renewGraphSubscription',
-      expectJson: true,
-    });
-    responsePayload = result.payload;
-  } catch (err) {
-    try {
-      await prisma.graphSubscription.update({
-        where: { subscriptionId },
-        data: { status: FAILED_STATUS },
-      });
-    } catch {
-      logger.warn('Could not mark subscription as FAILED after renew error', {
-        mailboxId,
-        subscriptionId,
-      });
-    }
-    throw err;
-  }
+  // The PATCH error propagates unchanged so the renewal service can classify it
+  // (auth → reconnect, 404/410 → expired, 429/5xx → transient) and then apply the
+  // matching CAS completion. No local FAILED write happens here.
+  const result = await performGraphRequest({
+    method: 'PATCH',
+    url,
+    accessToken,
+    body: { expirationDateTime: expirationDateTime.toISOString() },
+    fetchImpl,
+    operationLabel: 'renewGraphSubscription',
+    expectJson: true,
+  });
+  const responsePayload = result.payload;
 
   const remoteExpiration = isRecord(responsePayload)
     ? readString(responsePayload.expirationDateTime)
@@ -617,35 +601,7 @@ export async function renewGraphSubscription(
     );
   }
 
-  let saved: GraphSubscriptionRecord;
-  try {
-    saved = await prisma.graphSubscription.update({
-      where: { subscriptionId },
-      data: {
-        expirationDateTime: nextExpiration,
-        status: ACTIVE_STATUS,
-        lastRenewedAt: now,
-      },
-    });
-  } catch {
-    logger.error('Failed to persist renewed Graph subscription', {
-      mailboxId,
-      subscriptionId,
-    });
-    throw new GraphSubscriptionError(
-      'database',
-      'failed to persist renewed Graph subscription',
-    );
-  }
-
-  return {
-    id: saved.id,
-    mailboxId: saved.mailboxId,
-    subscriptionId: saved.subscriptionId,
-    resource: saved.resource,
-    expirationDateTime: saved.expirationDateTime,
-    status: saved.status,
-  };
+  return { subscriptionId, expirationDateTime: nextExpiration };
 }
 
 export async function deleteGraphSubscription(

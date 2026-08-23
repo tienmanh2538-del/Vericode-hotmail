@@ -41,6 +41,12 @@ export interface PersistRotatedRefreshTokenDeps {
 export interface PersistRotatedRefreshTokenResult {
   /** True only when a new token was encrypted AND written to the database. */
   rotated: boolean;
+  // TASK-084 — when a rotation was persisted, the exact ciphertext that was
+  // written. Callers that need to capture the mailbox's post-rotation credential
+  // generation (the subscription renewal worker's reconnect-required guard) read
+  // this instead of issuing a follow-up query. It is an OPAQUE marker only — it
+  // is never logged, printed, or decrypted. Undefined when nothing was rotated.
+  encryptedRefreshToken?: string;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -98,5 +104,5 @@ export async function persistRotatedRefreshToken(
 
   // Intentionally NOT logging the token. Only the safe identifier.
   logger.info('Persisted rotated Microsoft refresh token', { mailboxId });
-  return { rotated: true };
+  return { rotated: true, encryptedRefreshToken };
 }

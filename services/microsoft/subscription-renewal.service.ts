@@ -65,22 +65,93 @@ export interface RenewableSubscriptionCandidate {
 
 export type RenewalDecision = 'renew' | 'skip' | 'expired' | 'invalid';
 
-/** Persistence surface — supplied by a Prisma-backed adapter in production. */
-export interface SubscriptionRenewalRepo {
-  listRenewableCandidates(): Promise<RenewableSubscriptionCandidate[]>;
-  /** Subscription gone on Microsoft's side (404/410) or already past expiry. */
-  markSubscriptionExpired(subscriptionId: string): Promise<void>;
-  /** Renew failed after exhausting retries / on a fatal error. */
-  markSubscriptionFailed(subscriptionId: string): Promise<void>;
-  /** Refresh token revoked — the human operator must reconnect the mailbox. */
-  markMailboxReconnectRequired(mailboxId: string): Promise<void>;
-  /** Mailbox-level mirror of an expired/missing subscription. */
-  markMailboxSubscriptionExpired(mailboxId: string): Promise<void>;
+/**
+ * TASK-084 — the outcome of an atomic claim attempt on a GraphSubscription row.
+ * `claimed` is true only when this operation won the row (affected count = 1).
+ * `claimGeneration` is the exact `updatedAt` the claim wrote, read back and held
+ * as the CAS ownership token for every subsequent completion write. It is null
+ * whenever the claim was lost. `reclaimedStale` is observability only — true when
+ * the won row was a stale RENEWING reclaim rather than a fresh ACTIVE/FAILED one.
+ */
+export interface SubscriptionClaim {
+  claimed: boolean;
+  claimGeneration: Date | null;
+  reclaimedStale: boolean;
 }
 
-/** Access-token surface. Implementations decrypt + exchange the refresh token. */
+/**
+ * Persistence surface — supplied by a Prisma-backed adapter in production.
+ *
+ * TASK-084 — every write is an atomic claim (affected count = 1 to win) or a CAS
+ * completion (only the current claim owner, matched on the exact claim
+ * generation, may write). Mailbox lifecycle writers are conditional and only
+ * ever run AFTER the subscription-level CAS proved ownership (count = 1).
+ */
+export interface SubscriptionRenewalRepo {
+  listRenewableCandidates(): Promise<RenewableSubscriptionCandidate[]>;
+  /**
+   * Atomically claim a subscription for renewal: ACTIVE / FAILED / stale-RENEWING
+   * → RENEWING. Wins only when affected count = 1. Fresh RENEWING is never
+   * claimed. On a win, returns the exact written `updatedAt` as `claimGeneration`.
+   */
+  claimForRenewal(subscriptionId: string, now: Date): Promise<SubscriptionClaim>;
+  /**
+   * CAS success completion. Only writes when the row is still RENEWING with the
+   * exact claim generation. Returns true when this operation still owned the row.
+   */
+  markRenewedIfOwner(input: {
+    subscriptionId: string;
+    claimGeneration: Date;
+    newExpirationDateTime: Date;
+    now: Date;
+  }): Promise<boolean>;
+  /** CAS failure completion → FAILED. Returns ownership (count = 1). */
+  markSubscriptionFailedIfOwner(
+    subscriptionId: string,
+    claimGeneration: Date,
+  ): Promise<boolean>;
+  /** CAS 404/410 completion → EXPIRED. Returns ownership (count = 1). */
+  markSubscriptionExpiredIfOwner(
+    subscriptionId: string,
+    claimGeneration: Date,
+  ): Promise<boolean>;
+  /**
+   * Relation-aware mailbox writer (TASK-083 protection). ACTIVE →
+   * SUBSCRIPTION_EXPIRED only when NO OTHER possibly-live GraphSubscription
+   * exists (TASK-081/082 semantics), excluding the failing row itself. Returns
+   * true when the mailbox was actually transitioned.
+   */
+  markMailboxSubscriptionExpiredIfNoOtherLiveSubscription(input: {
+    mailboxId: string;
+    failingSubscriptionRowId: string;
+    now: Date;
+  }): Promise<boolean>;
+  /**
+   * Credential-generation-guarded mailbox writer (TASK-084 correction B). Marks
+   * RECONNECT_REQUIRED only when the mailbox is not DISABLED AND its stored
+   * credential generation still equals the one this operation used — so a stale
+   * pre-reconnect renewal can never overwrite a freshly OAuth-reconnected mailbox.
+   * `credentialGeneration` is an OPAQUE marker (never logged/decrypted).
+   */
+  markMailboxReconnectRequiredIfCredentialCurrent(
+    mailboxId: string,
+    credentialGeneration: string | null,
+  ): Promise<boolean>;
+}
+
+/**
+ * Access-token surface. Implementations decrypt + exchange the refresh token and
+ * also report the mailbox credential generation the operation committed to (the
+ * opaque `encryptedRefreshToken` marker) so the reconnect-required writer can
+ * prove the failure belongs to the CURRENT credential (TASK-084 correction B).
+ */
+export interface RenewalCredential {
+  accessToken: string;
+  credentialGeneration: string | null;
+}
+
 export interface RenewalAccessTokenPort {
-  getAccessTokenForMailbox(mailboxId: string): Promise<string>;
+  getAccessTokenForMailbox(mailboxId: string): Promise<RenewalCredential>;
 }
 
 /**
@@ -129,6 +200,12 @@ export interface SubscriptionRenewalRunResult {
   failedCount: number;
   reconnectRequiredCount: number;
   expiredCount: number;
+  // TASK-084 — concurrency-guard observability (K). `claimLostCount` counts
+  // subscriptions this run skipped because another worker owned the claim (or a
+  // completion CAS found ownership lost); `staleReclaimedCount` counts rows won
+  // by reclaiming a stale RENEWING generation.
+  claimLostCount: number;
+  staleReclaimedCount: number;
 }
 
 export type RenewalTokenErrorKind = 'reconnect_required' | 'transient' | 'config';
@@ -141,10 +218,21 @@ export type RenewalTokenErrorKind = 'reconnect_required' | 'transient' | 'config
  */
 export class SubscriptionRenewalTokenError extends Error {
   readonly kind: RenewalTokenErrorKind;
-  constructor(kind: RenewalTokenErrorKind, message: string) {
+  // TASK-084 — for a `reconnect_required` failure raised BEFORE a successful
+  // token exchange (Case A), this carries the mailbox credential generation the
+  // operation read at the start, so the reconnect-required writer can guard on it
+  // and never overwrite a concurrently OAuth-reconnected mailbox. Opaque marker;
+  // null when there was no stored credential. Irrelevant for transient/config.
+  readonly credentialGeneration: string | null;
+  constructor(
+    kind: RenewalTokenErrorKind,
+    message: string,
+    credentialGeneration: string | null = null,
+  ) {
     super(message);
     this.name = 'SubscriptionRenewalTokenError';
     this.kind = kind;
+    this.credentialGeneration = credentialGeneration;
   }
 }
 
@@ -262,10 +350,32 @@ type SubscriptionOutcome =
   | 'renewed'
   | 'failed'
   | 'reconnect_required'
-  | 'expired';
+  | 'expired'
+  | 'claim_lost';
 
-async function safely(
-  action: () => Promise<void>,
+/**
+ * Run a subscription-level CAS completion and return whether this operation
+ * still owned the claim. A thrown DB error is treated as NOT owned (count 0):
+ * per TASK-084 correction A, a persistence failure must never let a stale worker
+ * assume ownership or apply a downstream mailbox side effect.
+ */
+async function casOwned(
+  action: () => Promise<boolean>,
+  logger: Logger,
+  failureMessage: string,
+  context: Record<string, unknown>,
+): Promise<boolean> {
+  try {
+    return await action();
+  } catch (error) {
+    logger.warn(failureMessage, { ...context, errorName: safeErrorName(error) });
+    return false;
+  }
+}
+
+/** Best-effort mailbox lifecycle writer — only ever called AFTER a CAS win. */
+async function applyMailboxSideEffect(
+  action: () => Promise<boolean>,
   logger: Logger,
   failureMessage: string,
   context: Record<string, unknown>,
@@ -277,56 +387,101 @@ async function safely(
   }
 }
 
-async function handleExpired(
+/**
+ * TASK-084 STEP 1 → STEP 2 ordering for the 404/410 (expired) branch.
+ * STEP 1 is the CAS EXPIRED completion; the relation-aware mailbox writer (STEP
+ * 2) runs ONLY when STEP 1 proved ownership (count = 1). A lost claim or DB error
+ * yields ZERO mailbox side effect.
+ */
+async function completeExpired(
   candidate: RenewableSubscriptionCandidate,
   subscriptionId: string,
+  claimGeneration: Date,
   ctx: RenewContext,
 ): Promise<void> {
-  await safely(
-    () => ctx.repo.markSubscriptionExpired(subscriptionId),
+  const owned = await casOwned(
+    () => ctx.repo.markSubscriptionExpiredIfOwner(subscriptionId, claimGeneration),
     ctx.logger,
-    'Failed to mark subscription expired',
+    'Failed to CAS-mark subscription expired',
     { mailboxId: candidate.mailboxId },
   );
-  await safely(
-    () => ctx.repo.markMailboxSubscriptionExpired(candidate.mailboxId),
+  if (!owned) return;
+  await applyMailboxSideEffect(
+    () =>
+      ctx.repo.markMailboxSubscriptionExpiredIfNoOtherLiveSubscription({
+        mailboxId: candidate.mailboxId,
+        failingSubscriptionRowId: candidate.id,
+        now: ctx.now(),
+      }),
     ctx.logger,
     'Failed to mark mailbox subscription-expired',
     { mailboxId: candidate.mailboxId },
   );
 }
 
-async function handleReconnectRequired(
+/**
+ * TASK-084 STEP 1 → STEP 2 ordering for the reconnect-required branch. STEP 1 is
+ * the CAS FAILED completion (claim ownership gate, correction A/H); the
+ * credential-generation-guarded mailbox writer (STEP 2) runs ONLY when STEP 1
+ * proved ownership. The credential-generation guard additionally prevents a stale
+ * pre-reconnect renewal from overwriting a freshly OAuth-reconnected mailbox
+ * (correction B) while preserving genuine TASK-069C reconnect semantics.
+ */
+async function completeReconnectRequired(
   candidate: RenewableSubscriptionCandidate,
   subscriptionId: string,
+  claimGeneration: Date,
+  credentialGeneration: string | null,
   ctx: RenewContext,
 ): Promise<void> {
-  await safely(
-    () => ctx.repo.markMailboxReconnectRequired(candidate.mailboxId),
+  const owned = await casOwned(
+    () => ctx.repo.markSubscriptionFailedIfOwner(subscriptionId, claimGeneration),
+    ctx.logger,
+    'Failed to CAS-mark subscription failed',
+    { mailboxId: candidate.mailboxId },
+  );
+  if (!owned) return;
+  await applyMailboxSideEffect(
+    () =>
+      ctx.repo.markMailboxReconnectRequiredIfCredentialCurrent(
+        candidate.mailboxId,
+        credentialGeneration,
+      ),
     ctx.logger,
     'Failed to mark mailbox reconnect-required',
     { mailboxId: candidate.mailboxId },
   );
-  await safely(
-    () => ctx.repo.markSubscriptionFailed(subscriptionId),
+}
+
+/** Plain failure completion (transient exhausted / fatal). No mailbox effect. */
+async function completeFailed(
+  candidate: RenewableSubscriptionCandidate,
+  subscriptionId: string,
+  claimGeneration: Date,
+  ctx: RenewContext,
+): Promise<void> {
+  await casOwned(
+    () => ctx.repo.markSubscriptionFailedIfOwner(subscriptionId, claimGeneration),
     ctx.logger,
-    'Failed to mark subscription failed',
+    'Failed to CAS-mark subscription failed',
     { mailboxId: candidate.mailboxId },
   );
 }
 
 /**
- * Renew one subscription with bounded retries. Returns the terminal outcome.
- * Never throws — all failures are captured and reported via the return value.
+ * Renew one already-claimed subscription with bounded retries. `claimGeneration`
+ * is the CAS ownership token captured by the caller's successful claim. Returns
+ * the terminal outcome; never throws.
  */
 async function renewOneSubscription(
   candidate: RenewableSubscriptionCandidate,
   subscriptionId: string,
+  claimGeneration: Date,
   ctx: RenewContext,
 ): Promise<SubscriptionOutcome> {
-  let accessToken: string;
+  let credential: RenewalCredential;
   try {
-    accessToken = await ctx.accessToken.getAccessTokenForMailbox(
+    credential = await ctx.accessToken.getAccessTokenForMailbox(
       candidate.mailboxId,
     );
   } catch (error) {
@@ -334,16 +489,19 @@ async function renewOneSubscription(
       error instanceof SubscriptionRenewalTokenError &&
       error.kind === 'reconnect_required'
     ) {
-      await handleReconnectRequired(candidate, subscriptionId, ctx);
+      // Case A — reconnect failure BEFORE a successful token exchange. The guard
+      // uses the credential generation the token port read at operation start.
+      await completeReconnectRequired(
+        candidate,
+        subscriptionId,
+        claimGeneration,
+        error.credentialGeneration,
+        ctx,
+      );
       return 'reconnect_required';
     }
-    // transient/config/unknown token errors: record a failure, retry next tick.
-    await safely(
-      () => ctx.repo.markSubscriptionFailed(subscriptionId),
-      ctx.logger,
-      'Failed to mark subscription failed',
-      { mailboxId: candidate.mailboxId },
-    );
+    // transient/config/unknown token errors: CAS-record a failure, retry next tick.
+    await completeFailed(candidate, subscriptionId, claimGeneration, ctx);
     ctx.logger.warn('Subscription renewal could not obtain access token', {
       mailboxId: candidate.mailboxId,
       errorName: safeErrorName(error),
@@ -356,12 +514,30 @@ async function renewOneSubscription(
       const { newExpirationDateTime } = await ctx.renew.renew({
         mailboxId: candidate.mailboxId,
         subscriptionId,
-        accessToken,
+        accessToken: credential.accessToken,
         now: ctx.now(),
       });
 
+      const owned = await casOwned(
+        () =>
+          ctx.repo.markRenewedIfOwner({
+            subscriptionId,
+            claimGeneration,
+            newExpirationDateTime,
+            now: ctx.now(),
+          }),
+        ctx.logger,
+        'Failed to CAS-persist renewed subscription',
+        { mailboxId: candidate.mailboxId },
+      );
+      if (!owned) {
+        // Stale owner: another worker already reclaimed + completed. Do NOT
+        // overwrite the newer ACTIVE/expiration and do NOT write an audit entry.
+        return 'claim_lost';
+      }
+
       if (ctx.audit) {
-        await safely(
+        await applyMailboxSideEffect(
           async () => {
             await ctx.audit?.recordRenewed({
               mailboxId: candidate.mailboxId,
@@ -369,6 +545,7 @@ async function renewOneSubscription(
               oldExpirationDateTime: candidate.expirationDateTime,
               newExpirationDateTime,
             });
+            return true;
           },
           ctx.logger,
           'Failed to write SUBSCRIPTION_RENEWED audit entry',
@@ -380,24 +557,27 @@ async function renewOneSubscription(
       const failureKind = classifyRenewError(error);
 
       if (failureKind === 'reconnect_required') {
-        await handleReconnectRequired(candidate, subscriptionId, ctx);
+        // Case B — Graph 401 AFTER token acquisition. The guard uses the
+        // credential generation the operation committed to (post any rotation).
+        await completeReconnectRequired(
+          candidate,
+          subscriptionId,
+          claimGeneration,
+          credential.credentialGeneration,
+          ctx,
+        );
         return 'reconnect_required';
       }
       if (failureKind === 'expired') {
-        await handleExpired(candidate, subscriptionId, ctx);
+        await completeExpired(candidate, subscriptionId, claimGeneration, ctx);
         return 'expired';
       }
       if (failureKind === 'transient' && attempt < ctx.maxRenewAttempts) {
         await ctx.sleep(DEFAULT_RETRY_BASE_DELAY_MS * attempt);
         continue;
       }
-      // transient exhausted, or fatal — record failure and move on.
-      await safely(
-        () => ctx.repo.markSubscriptionFailed(subscriptionId),
-        ctx.logger,
-        'Failed to mark subscription failed',
-        { mailboxId: candidate.mailboxId },
-      );
+      // transient exhausted, or fatal — CAS-record failure and move on.
+      await completeFailed(candidate, subscriptionId, claimGeneration, ctx);
       ctx.logger.warn('Subscription renewal failed', {
         mailboxId: candidate.mailboxId,
         failureKind,
@@ -453,6 +633,8 @@ export async function runSubscriptionRenewalOnce(
     failedCount: 0,
     reconnectRequiredCount: 0,
     expiredCount: 0,
+    claimLostCount: 0,
+    staleReclaimedCount: 0,
   };
 
   let candidates: RenewableSubscriptionCandidate[];
@@ -489,8 +671,34 @@ export async function runSubscriptionRenewalOnce(
     const subscriptionId = (candidate.subscriptionId as string).trim();
 
     try {
+      // TASK-084 — atomic claim BEFORE any token acquisition / Graph PATCH. A
+      // lost claim means another worker owns this row: skip entirely (no token,
+      // no PATCH, no completion, no mailbox side effect) and re-evaluate next tick.
+      let claim: SubscriptionClaim;
+      try {
+        claim = await ctx.repo.claimForRenewal(subscriptionId, now());
+      } catch (error) {
+        // Claim persistence failed: treat as a lost claim (fail-closed) rather
+        // than proceeding without proven ownership.
+        result.claimLostCount += 1;
+        logger.warn('Subscription renewal could not claim subscription', {
+          mailboxId: candidate.mailboxId,
+          errorName: safeErrorName(error),
+        });
+        continue;
+      }
+
+      if (!claim.claimed || claim.claimGeneration === null) {
+        result.claimLostCount += 1;
+        continue;
+      }
+      if (claim.reclaimedStale) {
+        result.staleReclaimedCount += 1;
+      }
+      const claimGeneration = claim.claimGeneration;
+
       if (decision === 'expired') {
-        await handleExpired(candidate, subscriptionId, ctx);
+        await completeExpired(candidate, subscriptionId, claimGeneration, ctx);
         result.expiredCount += 1;
         logger.info('Subscription marked expired', {
           mailboxId: candidate.mailboxId,
@@ -499,7 +707,12 @@ export async function runSubscriptionRenewalOnce(
         continue;
       }
 
-      const outcome = await renewOneSubscription(candidate, subscriptionId, ctx);
+      const outcome = await renewOneSubscription(
+        candidate,
+        subscriptionId,
+        claimGeneration,
+        ctx,
+      );
       if (outcome === 'renewed') {
         result.renewedCount += 1;
         logger.info('Subscription renewed', {
@@ -510,6 +723,8 @@ export async function runSubscriptionRenewalOnce(
         result.reconnectRequiredCount += 1;
       } else if (outcome === 'expired') {
         result.expiredCount += 1;
+      } else if (outcome === 'claim_lost') {
+        result.claimLostCount += 1;
       } else {
         result.failedCount += 1;
       }

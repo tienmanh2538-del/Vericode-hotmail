@@ -47,7 +47,12 @@ describe('persistRotatedRefreshToken', () => {
       logger: captureLogger(),
     });
 
-    expect(result).toEqual({ rotated: true });
+    // TASK-084 — the written ciphertext is surfaced so the renewal worker can
+    // capture the post-rotation credential generation without a follow-up query.
+    expect(result).toEqual({
+      rotated: true,
+      encryptedRefreshToken: fakeEncrypt('new-refresh-token'),
+    });
     expect(encryptSecret).toHaveBeenCalledWith('new-refresh-token');
     expect(update).toHaveBeenCalledTimes(1);
     expect(update).toHaveBeenCalledWith({
