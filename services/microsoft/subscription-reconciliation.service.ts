@@ -169,6 +169,13 @@ export type MailboxReconciliationOutcome =
   | 'reconnect_required'
   | 'failed_transient'
   | 'failed'
+  /**
+   * TASK-086 — provisioning deferred because a FRESH renewal claim (TASK-084)
+   * still holds the mailbox's live subscription slot. Nothing was created,
+   * nothing was written, no mailbox status changed; a later operator run (or
+   * the next connect) resolves it once the claim settles or goes stale.
+   */
+  | 'blocked_renewing'
   /** Created, then the mailbox left ACTIVE → row EXPIRED + one cleanup try. */
   | 'created_disconnect_cleanup'
   /** Recovery only: provisioned AND conditionally flipped back to ACTIVE. */
@@ -207,6 +214,8 @@ export interface SubscriptionReconciliationRunResult {
   transientFailureCount: number;
   failedCount: number;
   disconnectRaceCount: number;
+  /** TASK-086 — candidates deferred by a fresh renewal claim on the live slot. */
+  blockedRenewingCount: number;
   /** TASK-083 — mailboxes provisioned AND flipped back to ACTIVE. */
   recoveredCount: number;
   /** TASK-083 — recovery candidates whose state changed concurrently. */
@@ -442,6 +451,39 @@ async function reconcileOneMailbox(
     return { record: { mailboxId, outcome: 'failed' } };
   }
 
+  // TASK-086 — the three non-creating concurrency outcomes. NONE of them may
+  // flip a mailbox (recovery included): a conflict is not proof that THIS run
+  // owns a usable subscription, and a fresh renewal claim is simply a deferral.
+  if (ensured.outcome === 'blocked_renewing') {
+    ctx.logger.info('Reconciliation: live slot held by a fresh renewal claim', {
+      mailboxId,
+    });
+    return { record: { mailboxId, outcome: 'blocked_renewing' } };
+  }
+  if (
+    ensured.outcome === 'lost_ownership' ||
+    ensured.outcome === 'conflict_existing'
+  ) {
+    // A concurrent operation owns the live subscription; the seam already
+    // released whatever this run had created remotely. Nothing to clean up
+    // here, and the winner is never touched.
+    ctx.logger.info('Reconciliation: live subscription owned by a concurrent run', {
+      mailboxId,
+      ensureOutcome: ensured.outcome,
+    });
+    return { record: { mailboxId, outcome: 'skipped_existing' } };
+  }
+  if (ensured.outcome === 'conflict_unowned') {
+    // Conflict with no local live owner: either a winner that has not persisted
+    // yet, or a remote subscription this database does not own. Fail-safe —
+    // report a failure so the operator can re-run; never fabricate local state.
+    ctx.logger.warn('Reconciliation: subscription conflict without a local owner', {
+      mailboxId,
+      source: ensured.source,
+    });
+    return { record: { mailboxId, outcome: 'failed' } };
+  }
+
   if (ctx.recovery) {
     // TASK-083 — ACTIVE is the FINAL step of recovery, and only via the
     // conditional flip: it matches solely when the mailbox is still
@@ -546,6 +588,9 @@ function countOutcome(
     case 'failed_transient':
       result.transientFailureCount += 1;
       break;
+    case 'blocked_renewing':
+      result.blockedRenewingCount += 1;
+      break;
     case 'created_disconnect_cleanup':
       result.createdCount += 1;
       result.disconnectRaceCount += 1;
@@ -592,6 +637,7 @@ export async function runSubscriptionReconciliationOnce(
     transientFailureCount: 0,
     failedCount: 0,
     disconnectRaceCount: 0,
+    blockedRenewingCount: 0,
     recoveredCount: 0,
     skippedStateChangedCount: 0,
     aborted: false,
@@ -680,6 +726,7 @@ export async function runSubscriptionReconciliationOnce(
     transientFailureCount: result.transientFailureCount,
     failedCount: result.failedCount,
     disconnectRaceCount: result.disconnectRaceCount,
+    blockedRenewingCount: result.blockedRenewingCount,
     recoveredCount: result.recoveredCount,
     skippedStateChangedCount: result.skippedStateChangedCount,
     aborted: result.aborted,

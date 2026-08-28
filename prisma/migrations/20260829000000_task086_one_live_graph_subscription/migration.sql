@@ -1,0 +1,62 @@
+-- TASK-086 — Enforce "at most one LIVE GraphSubscription per mailbox" at the
+-- database level. This is the correctness guard for provisioning concurrency.
+--
+-- Why this is needed:
+--   The provisioning seam (ensureInboxSubscriptionForConnectedMailbox) is a
+--   check-then-create sequence: OAuth connect/reconnect, TASK-082 reconciliation
+--   and TASK-083 recovery can each read "no live subscription" before any of
+--   them has written a row, and then all create one. Microsoft documents a 409
+--   for duplicate subscriptions, but that is a REMOTE behaviour we must not rely
+--   on for LOCAL correctness. A PARTIAL unique index makes the database the one
+--   and only serialisation point: the second writer fails with a unique
+--   violation (P2002), which the service translates into a controlled ownership
+--   loss (its own remote subscription is released, the winner is untouched).
+--
+-- Why a raw migration (not the Prisma schema):
+--   Prisma's schema language cannot express a partial (filtered / WHERE) unique
+--   index, so this index is defined here in raw SQL. It is intentionally absent
+--   from schema.prisma (see the note on the GraphSubscription model there).
+--   Same precedent as TASK-068A's one-active-Telegram-mapping index.
+--
+-- Why it is safe:
+--   * PARTIAL — it only constrains rows whose status is live (ACTIVE, RENEWING,
+--     FAILED). EXPIRED rows are unconstrained, so a mailbox keeps its full
+--     subscription history and TASK-052 (disconnect never hard-deletes) is
+--     untouched. Every state transition into a live status is a live-to-live
+--     update of an existing row (TASK-084 claim / renewal completion), so the
+--     index can only ever be violated by an INSERT.
+--   * IF NOT EXISTS — re-running the migration is a no-op.
+--   * Additive — nothing is dropped, rewritten, backfilled, or deduplicated.
+--
+-- M2 — FAIL CLOSED (locked decision):
+--   This migration deliberately does NOT deduplicate historical rows. It never
+--   picks a winner, never marks a duplicate loser EXPIRED, and never mutates
+--   lifecycle state. If a legacy mailbox already has more than one live row,
+--   index creation FAILS LOUDLY during `prisma migrate deploy` and the
+--   deployment must stop. That is intentional: a local loser row may correspond
+--   to a subscription that is still alive on Microsoft's side, and remote
+--   remediation is out of scope for TASK-086, so a silent local "cleanup" would
+--   strand a live remote subscription.
+--
+--   Read-only preflight to run on each environment BEFORE deploying (it changes
+--   nothing; it only reports mailboxes that would block the index):
+--
+--     SELECT "mailboxId", COUNT(*) AS live_rows
+--     FROM "GraphSubscription"
+--     WHERE "status" IN ('ACTIVE', 'RENEWING', 'FAILED')
+--     GROUP BY "mailboxId"
+--     HAVING COUNT(*) > 1;
+--
+--   An empty result means the deploy is safe. A non-empty result must be
+--   reconciled operationally (human-approved) before retrying the deploy.
+--
+--   Post-deploy verification (read-only):
+--
+--     SELECT indexname FROM pg_indexes
+--     WHERE tablename = 'GraphSubscription'
+--       AND indexname = 'GraphSubscription_mailboxId_live_unique';
+
+-- CreateIndex
+CREATE UNIQUE INDEX IF NOT EXISTS "GraphSubscription_mailboxId_live_unique"
+  ON "GraphSubscription" ("mailboxId")
+  WHERE "status" IN ('ACTIVE', 'RENEWING', 'FAILED');

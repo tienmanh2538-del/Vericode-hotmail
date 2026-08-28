@@ -12,6 +12,7 @@ import { persistRotatedRefreshToken } from '@/services/microsoft/refresh-token-r
 import { classifyRefreshTokenError } from '@/services/microsoft/refresh-token-failure';
 import { renewGraphSubscription } from '@/services/microsoft/graph-subscription.service';
 import { BLOCKING_SUBSCRIPTION_STATUSES } from '@/services/microsoft/mailbox-subscription-provisioning.service';
+import { STALE_CLAIM_CUTOFF_MS } from '@/services/microsoft/subscription-claim-window';
 import { createAuditLogInDb } from '@/services/logs/prisma-audit-log-store';
 import {
   runSubscriptionRenewalOnce,
@@ -40,7 +41,11 @@ const MAILBOX_STATUS_DISABLED = 'DISABLED';
 // once its claim generation is older than this. 30 min = 2× the default 15-min
 // scheduler interval, so a healthy in-flight renewal is never reclaimed. Code-level
 // constant by design (D2) — NOT an env knob.
-const STALE_CLAIM_CUTOFF_MS = 30 * 60 * 1000;
+//
+// TASK-086 — the constant moved to `subscription-claim-window` (a leaf module) so
+// the provisioning seam can reuse THE SAME window when it normalises time-expired
+// rows, instead of declaring a second 30-minute constant that could drift. The
+// value and every use here are unchanged.
 
 // TASK-069C — the revoke-vs-transient decision now lives in the shared
 // `classifyRefreshTokenError` helper so all three workers stay in lockstep.

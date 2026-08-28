@@ -29,6 +29,15 @@ interface RecoveryFakeOptions {
   ensureOutcome?: (mailboxId: string) =>
     | { outcome: 'created'; subscriptionId: string }
     | { outcome: 'skipped_existing'; existingStatus: 'FAILED' }
+    // TASK-086 — the non-creating concurrency outcomes. None of them may ever
+    // drive the SUBSCRIPTION_EXPIRED → ACTIVE flip.
+    | { outcome: 'blocked_renewing' }
+    | { outcome: 'lost_ownership'; existingStatus: 'ACTIVE' }
+    | { outcome: 'conflict_existing'; existingStatus: 'ACTIVE' }
+    | {
+        outcome: 'conflict_unowned';
+        source: 'remote_conflict' | 'local_unique_conflict';
+      }
     | { outcome: 'failed'; errorName: string };
   /** Result of the conditional SUBSCRIPTION_EXPIRED → ACTIVE flip. */
   flipResult?: boolean;
@@ -546,5 +555,97 @@ describe('recovery batch behaviour', () => {
       expect(serializedResult).not.toContain(forbidden);
       expect(serializedLogs).not.toContain(forbidden);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-086 — recovery must never flip on a concurrency outcome
+// ---------------------------------------------------------------------------
+
+describe('TASK-086 — recovery safety on non-creating ensure outcomes', () => {
+  it('blocked_renewing → no flip, no cleanup, reported as its own outcome', async () => {
+    const { deps, repo, remoteCleanup } = buildRecoveryDeps({
+      recoveryCandidates: ['mb-1'],
+      ensureOutcome: () => ({ outcome: 'blocked_renewing' }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, {
+      mode: 'apply',
+      recoverSubscriptionExpired: true,
+    });
+
+    expect(outcomesOf(result)).toEqual(['blocked_renewing']);
+    expect(result.blockedRenewingCount).toBe(1);
+    expect(result.recoveredCount).toBe(0);
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
+    expect(repo.markSubscriptionExpired).not.toHaveBeenCalled();
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+  });
+
+  it('conflict_existing (Microsoft 409 + local winner) → never flips the mailbox ACTIVE', async () => {
+    const { deps, repo, remoteCleanup } = buildRecoveryDeps({
+      recoveryCandidates: ['mb-1'],
+      ensureOutcome: () => ({ outcome: 'conflict_existing', existingStatus: 'ACTIVE' }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, {
+      mode: 'apply',
+      recoverSubscriptionExpired: true,
+    });
+
+    expect(outcomesOf(result)).toEqual(['skipped_existing']);
+    expect(result.recoveredCount).toBe(0);
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
+    // The winner belongs to someone else — it must not be cleaned up.
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+    expect(repo.markSubscriptionExpired).not.toHaveBeenCalled();
+  });
+
+  it('lost_ownership → never flips, never touches the winner', async () => {
+    const { deps, repo, remoteCleanup } = buildRecoveryDeps({
+      recoveryCandidates: ['mb-1'],
+      ensureOutcome: () => ({ outcome: 'lost_ownership', existingStatus: 'ACTIVE' }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, {
+      mode: 'apply',
+      recoverSubscriptionExpired: true,
+    });
+
+    expect(outcomesOf(result)).toEqual(['skipped_existing']);
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+  });
+
+  it('conflict_unowned → fail-safe failure, no flip, nothing fabricated', async () => {
+    const { deps, repo } = buildRecoveryDeps({
+      recoveryCandidates: ['mb-1'],
+      ensureOutcome: () => ({
+        outcome: 'conflict_unowned',
+        source: 'remote_conflict',
+      }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, {
+      mode: 'apply',
+      recoverSubscriptionExpired: true,
+    });
+
+    expect(outcomesOf(result)).toEqual(['failed']);
+    expect(result.failedCount).toBe(1);
+    expect(result.recoveredCount).toBe(0);
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
+  });
+
+  it('a genuine created outcome still recovers the mailbox (no regression)', async () => {
+    const { deps, repo } = buildRecoveryDeps({ recoveryCandidates: ['mb-1'] });
+
+    const result = await runSubscriptionReconciliationOnce(deps, {
+      mode: 'apply',
+      recoverSubscriptionExpired: true,
+    });
+
+    expect(outcomesOf(result)).toEqual(['recovered']);
+    expect(repo.markMailboxActiveIfSubscriptionExpired).toHaveBeenCalledTimes(1);
   });
 });

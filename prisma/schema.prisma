@@ -245,10 +245,22 @@ model GraphSubscription {
   status             GraphSubscriptionStatus @default(ACTIVE)
   lastRenewedAt      DateTime?
   createdAt          DateTime                @default(now())
+  // TASK-084 uses `updatedAt` as the renewal claim generation: the worker writes
+  // it EXPLICITLY when claiming and every completion is CAS-matched on it.
   updatedAt          DateTime                @updatedAt
 
   @@index([mailboxId])
   @@index([status])
+  // TASK-086 — "at most one LIVE subscription per mailbox" (status ACTIVE /
+  // RENEWING / FAILED) is enforced at the DB level by a PARTIAL unique index on
+  // (mailboxId). Prisma's schema language cannot express a partial (filtered)
+  // unique index, so it lives in the raw migration
+  // 20260829000000_task086_one_live_graph_subscription. EXPIRED rows are NOT
+  // constrained, so a mailbox keeps its full subscription history. Note for
+  // maintainers: a future `prisma migrate dev` may report this index as drift
+  // because the schema does not describe it — same situation as the
+  // one-ACTIVE-mapping index on TelegramMapping. Do not "fix" it by dropping
+  // the index.
 }
 
 model ProcessedMessage {

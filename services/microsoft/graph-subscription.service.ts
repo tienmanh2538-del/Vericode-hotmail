@@ -4,6 +4,10 @@ import { prisma as defaultPrisma } from '@/lib/prisma';
 import { requireGraphSubscriptionEnv, type EnvValues } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
 import { hashSensitiveValue } from '@/lib/security/redact';
+import {
+  isUniqueConstraintError,
+  uniqueConstraintTargetIncludes,
+} from '@/lib/db/prisma-error';
 
 const logger = createLogger();
 
@@ -32,6 +36,14 @@ const CLIENT_STATE_MAX_LENGTH = 128;
 const ACTIVE_STATUS: GraphSubscriptionStatus = 'ACTIVE';
 const EXPIRED_STATUS: GraphSubscriptionStatus = 'EXPIRED';
 
+// TASK-086 — name of the PARTIAL unique index that enforces "at most one live
+// GraphSubscription per mailbox" at the database level (raw SQL migration; see
+// prisma/migrations/*_task086_one_live_graph_subscription). Exported so the
+// error-classification below and the tests both reference the same identifier
+// Prisma reports in `meta.target` — never a hand-typed duplicate string.
+export const GRAPH_SUBSCRIPTION_LIVE_UNIQUE_INDEX =
+  'GraphSubscription_mailboxId_live_unique';
+
 // -----------------------------------------------------------------------------
 // Public types
 // -----------------------------------------------------------------------------
@@ -54,7 +66,15 @@ export type GraphSubscriptionErrorKind =
   | 'http'
   | 'network'
   | 'parse'
-  | 'database';
+  | 'database'
+  // TASK-086 — Microsoft refused the create because a subscription with the same
+  // changeType + resource already exists (documented HTTP 409). Defensive only:
+  // local correctness never depends on Microsoft serialising concurrent creates.
+  | 'conflict'
+  // TASK-086 — the remote subscription was created but the local INSERT lost the
+  // "at most one live subscription per mailbox" race to a concurrent operation.
+  // This is an ownership loss, NOT an infrastructure failure.
+  | 'ownership_conflict';
 
 export class GraphSubscriptionError extends Error {
   readonly kind: GraphSubscriptionErrorKind;
@@ -323,6 +343,17 @@ function mapHttpStatusToError(
       graphErrorCode,
     });
   }
+  if (status === 409) {
+    // TASK-086 — Microsoft documents that a create whose changeType + resource
+    // duplicates an existing subscription fails with 409. Classified as its own
+    // kind so callers can react deliberately (re-read local state) instead of
+    // treating it as a generic HTTP failure. It is DEFENSIVE handling only: the
+    // local uniqueness guard, not this response, is the correctness boundary.
+    return new GraphSubscriptionError('conflict', 'GRAPH_SUBSCRIPTION_CONFLICT', {
+      httpStatus: status,
+      graphErrorCode,
+    });
+  }
   if (status === 429) {
     return new GraphSubscriptionError('rate_limited', 'GRAPH_RATE_LIMITED', {
       httpStatus: status,
@@ -513,19 +544,54 @@ export async function createInboxSubscription(
         status: ACTIVE_STATUS,
       },
     });
-  } catch {
-    // Do not log the response payload — it contains clientState plaintext we
-    // sent in the request and Microsoft echoes back on 201.
-    logger.error('Failed to persist Graph subscription', { mailboxId });
+  } catch (persistError) {
+    // TASK-086 — two distinct failure classes share one compensation, but NOT
+    // one meaning:
+    //   * unique-constraint violation on the live-per-mailbox partial index →
+    //     a concurrent operation already owns the mailbox's live slot. This is
+    //     an OWNERSHIP LOSS: our remote subscription is the loser and must be
+    //     removed, but nothing is broken. A P2002 on `subscriptionId` is NOT
+    //     this case (it would mean Microsoft handed back an id we already
+    //     store) and stays a generic database failure.
+    //   * anything else → generic infrastructure failure, TASK-081 semantics.
+    const ownershipLost =
+      isUniqueConstraintError(persistError) &&
+      uniqueConstraintTargetIncludes(
+        persistError,
+        GRAPH_SUBSCRIPTION_LIVE_UNIQUE_INDEX,
+      );
+
+    // Do not log the response payload or the raw error — the payload contains
+    // clientState plaintext we sent and Microsoft echoes back on 201, and a raw
+    // driver error can carry row/connection metadata.
+    if (ownershipLost) {
+      logger.info('Graph subscription live slot already owned — releasing ours', {
+        mailboxId,
+      });
+    } else {
+      logger.error('Failed to persist Graph subscription', { mailboxId });
+    }
+
     // TASK-081 — the remote subscription now exists but no local row records
     // it, so nothing (webhook validation, renewal, disconnect cleanup) would
     // ever see it. Best-effort compensating remote DELETE, exactly once: if the
     // cleanup itself fails we log sanitized and stop — never retried, never a
-    // fake local ACTIVE row, and the database error below still propagates.
+    // fake local ACTIVE row, and the error below still propagates.
+    //
+    // TASK-086 — the delete targets ONLY `subscriptionId`, the id Microsoft
+    // returned for THIS operation's own create. The winner's subscription is
+    // never referenced here, and no cleanup is ever keyed by mailboxId.
     try {
       await deleteGraphSubscription({ mailboxId, subscriptionId, accessToken }, deps);
     } catch {
       logger.warn('Compensating Graph subscription delete failed', { mailboxId });
+    }
+
+    if (ownershipLost) {
+      throw new GraphSubscriptionError(
+        'ownership_conflict',
+        'GRAPH_SUBSCRIPTION_LIVE_SLOT_TAKEN',
+      );
     }
     throw new GraphSubscriptionError(
       'database',

@@ -31,6 +31,14 @@ interface FakeDepsOptions {
   ensureOutcome?: (mailboxId: string) =>
     | { outcome: 'created'; subscriptionId: string }
     | { outcome: 'skipped_existing'; existingStatus: 'ACTIVE' }
+    // TASK-086 — the non-creating concurrency outcomes of the ensure seam.
+    | { outcome: 'blocked_renewing' }
+    | { outcome: 'lost_ownership'; existingStatus: 'ACTIVE' }
+    | { outcome: 'conflict_existing'; existingStatus: 'ACTIVE' }
+    | {
+        outcome: 'conflict_unowned';
+        source: 'remote_conflict' | 'local_unique_conflict';
+      }
     | { outcome: 'failed'; errorName: string };
   cleanupError?: Error;
 }
@@ -274,11 +282,16 @@ describe('runSubscriptionReconciliationOnce — no-op on potentially-live subscr
     const createSpy = vi.fn();
     const fakePrisma = {
       graphSubscription: {
-        findFirst: vi.fn(async () => ({
-          subscriptionId: 'sub-live',
-          status: 'RENEWING' as const,
-          expirationDateTime: new Date(NOW.getTime() + 60_000),
-        })),
+        findMany: vi.fn(async () => [
+          {
+            id: 'row-live',
+            subscriptionId: 'sub-live',
+            status: 'RENEWING' as const,
+            expirationDateTime: new Date(NOW.getTime() + 60_000),
+            updatedAt: NOW,
+          },
+        ]),
+        updateMany: vi.fn(async () => ({ count: 0 })),
       },
     };
     const { deps } = buildFakeDeps({ candidates: ['mb-1'] });
@@ -460,5 +473,79 @@ describe('runSubscriptionReconciliationOnce — batch isolation and sanitization
       'outcome',
       'remoteCleanup',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-086 — concurrency outcomes plumbed through reconciliation
+// ---------------------------------------------------------------------------
+
+describe('TASK-086 — ensure concurrency outcomes in normal reconciliation', () => {
+  it('blocked_renewing is reported as its own outcome and counter', async () => {
+    const { deps, remoteCleanup, repo } = buildFakeDeps({
+      candidates: ['mb-1'],
+      ensureOutcome: () => ({ outcome: 'blocked_renewing' }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, { mode: 'apply' });
+
+    expect(outcomesOf(result)).toEqual(['blocked_renewing']);
+    expect(result.blockedRenewingCount).toBe(1);
+    expect(result.createdCount).toBe(0);
+    expect(result.failedCount).toBe(0);
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+    expect(repo.markSubscriptionExpired).not.toHaveBeenCalled();
+  });
+
+  it('lost_ownership and conflict_existing count as an existing live subscription', async () => {
+    for (const outcome of ['lost_ownership', 'conflict_existing'] as const) {
+      const { deps, remoteCleanup } = buildFakeDeps({
+        candidates: ['mb-1'],
+        ensureOutcome: () => ({ outcome, existingStatus: 'ACTIVE' }),
+      });
+
+      const result = await runSubscriptionReconciliationOnce(deps, { mode: 'apply' });
+
+      expect(outcomesOf(result)).toEqual(['skipped_existing']);
+      expect(result.createdCount).toBe(0);
+      // The winner belongs to a concurrent operation — never cleaned up here.
+      expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+    }
+  });
+
+  it('conflict_unowned is a fail-safe failure, not a create and not a cleanup', async () => {
+    const { deps, remoteCleanup } = buildFakeDeps({
+      candidates: ['mb-1'],
+      ensureOutcome: () => ({
+        outcome: 'conflict_unowned',
+        source: 'local_unique_conflict',
+      }),
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps, { mode: 'apply' });
+
+    expect(outcomesOf(result)).toEqual(['failed']);
+    expect(result.failedCount).toBe(1);
+    expect(result.createdCount).toBe(0);
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+  });
+
+  it('dry-run never reaches the ensure seam, so normalisation can never write', async () => {
+    const { deps, repo, accessToken, ensure, remoteCleanup } = buildFakeDeps({
+      candidates: ['mb-1', 'mb-2'],
+    });
+
+    const result = await runSubscriptionReconciliationOnce(deps);
+
+    expect(result.mode).toBe('dry_run');
+    expect(outcomesOf(result)).toEqual(['candidate', 'candidate']);
+    // The normalisation writes live INSIDE the ensure seam; dry-run never calls
+    // it, so no conditional EXPIRED transition can happen either.
+    expect(ensure.ensure).not.toHaveBeenCalled();
+    expect(accessToken.getAccessTokenForMailbox).not.toHaveBeenCalled();
+    expect(remoteCleanup.deleteRemoteSubscription).not.toHaveBeenCalled();
+    expect(repo.markSubscriptionExpired).not.toHaveBeenCalled();
+    expect(repo.markMailboxReconnectRequiredIfActive).not.toHaveBeenCalled();
+    expect(repo.markMailboxActiveIfSubscriptionExpired).not.toHaveBeenCalled();
   });
 });

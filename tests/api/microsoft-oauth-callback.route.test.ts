@@ -29,34 +29,59 @@ const subscriptionStore: Array<{
   expirationDateTime: Date;
   status: string;
   lastRenewedAt: Date | null;
+  // TASK-084 claim generation, read by the TASK-086 stale-claim predicate.
+  updatedAt: Date;
 }> = [];
 let subscriptionIdCounter = 0;
 
 vi.mock('@/lib/prisma', () => ({
   prisma: {
     graphSubscription: {
-      async findFirst({
+      // TASK-086 — the ensure seam reads live rows by STATUS only (expiration is
+      // resolved by the conditional normalisation below), matching the partial
+      // unique index.
+      async findMany({
         where,
       }: {
-        where: {
-          mailboxId: string;
-          status: { in: string[] };
-          expirationDateTime: { gt: Date };
-        };
+        where: { mailboxId: string; status: { in: string[] } };
       }) {
-        const matches = subscriptionStore
+        return subscriptionStore
           .filter(
             (s) =>
-              s.mailboxId === where.mailboxId &&
-              where.status.in.includes(s.status) &&
-              s.expirationDateTime.getTime() >
-                where.expirationDateTime.gt.getTime(),
+              s.mailboxId === where.mailboxId && where.status.in.includes(s.status),
           )
           .sort(
             (a, b) =>
               b.expirationDateTime.getTime() - a.expirationDateTime.getTime(),
-          );
-        return matches[0] ? { ...matches[0] } : null;
+          )
+          .map((s) => ({ ...s }));
+      },
+      // TASK-086 — conditional expiry normalisation (pinned row + observed
+      // status + time predicate, plus the stale-claim predicate for RENEWING).
+      async updateMany({
+        where,
+        data,
+      }: {
+        where: {
+          id: string;
+          status: string;
+          expirationDateTime: { lte: Date };
+          updatedAt?: { lt: Date };
+        };
+        data: { status: string };
+      }) {
+        const target = subscriptionStore.find(
+          (s) =>
+            s.id === where.id &&
+            s.status === where.status &&
+            s.expirationDateTime.getTime() <=
+              where.expirationDateTime.lte.getTime() &&
+            (where.updatedAt === undefined ||
+              s.updatedAt.getTime() < where.updatedAt.lt.getTime()),
+        );
+        if (!target) return { count: 0 };
+        target.status = data.status;
+        return { count: 1 };
       },
       async create({ data }: { data: Record<string, unknown> }) {
         subscriptionIdCounter += 1;
@@ -69,6 +94,7 @@ vi.mock('@/lib/prisma', () => ({
           expirationDateTime: data.expirationDateTime as Date,
           status: data.status as string,
           lastRenewedAt: null,
+          updatedAt: new Date(),
         };
         subscriptionStore.push(record);
         return { ...record };
@@ -707,6 +733,7 @@ describe('GET callback — Graph subscription provisioning (TASK-081)', () => {
       expirationDateTime: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
       status: 'ACTIVE',
       lastRenewedAt: null,
+      updatedAt: new Date(),
     });
 
     const request = makeRequest(

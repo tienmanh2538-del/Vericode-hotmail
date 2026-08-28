@@ -21,46 +21,78 @@ const FUTURE = new Date(NOW.getTime() + 3 * 24 * 60 * 60 * 1000);
 const PAST = new Date(NOW.getTime() - 60 * 60 * 1000);
 
 interface FakeRow {
+  id?: string;
   mailboxId: string;
   subscriptionId: string;
   status: GraphSubscriptionStatus;
   expirationDateTime: Date;
+  /** TASK-084 claim generation; only meaningful for RENEWING rows. */
+  updatedAt?: Date;
 }
 
-// Interprets the exact Prisma-shaped query the service issues so the ensure
-// policy (status-in + expiration-gt filter) is exercised end to end.
-function fakeEnsurePrisma(rows: FakeRow[]) {
-  const findFirst = vi.fn(
+// TASK-086 — interprets the exact Prisma-shaped calls the service issues (the
+// live-row read and the conditional normalisation writes) so the whole
+// normalise → re-read → create policy is exercised end to end.
+function fakeEnsurePrisma(input: FakeRow[]) {
+  const rows = input.map((r, index) => ({
+    id: r.id ?? `row_${index}`,
+    mailboxId: r.mailboxId,
+    subscriptionId: r.subscriptionId,
+    status: r.status,
+    expirationDateTime: r.expirationDateTime,
+    updatedAt: r.updatedAt ?? NOW,
+  }));
+
+  const findMany = vi.fn(
     async ({
       where,
     }: {
-      where: {
-        mailboxId: string;
-        status: { in: GraphSubscriptionStatus[] };
-        expirationDateTime: { gt: Date };
-      };
-    }) => {
-      const matches = rows
+      where: { mailboxId: string; status: { in: GraphSubscriptionStatus[] } };
+    }) =>
+      rows
         .filter(
           (r) =>
-            r.mailboxId === where.mailboxId &&
-            where.status.in.includes(r.status) &&
-            r.expirationDateTime.getTime() > where.expirationDateTime.gt.getTime(),
+            r.mailboxId === where.mailboxId && where.status.in.includes(r.status),
         )
         .sort(
           (a, b) => b.expirationDateTime.getTime() - a.expirationDateTime.getTime(),
-        );
-      const m = matches[0];
-      return m
-        ? {
-            subscriptionId: m.subscriptionId,
-            status: m.status,
-            expirationDateTime: m.expirationDateTime,
-          }
-        : null;
+        )
+        .map((r) => ({ ...r })),
+  );
+
+  const updateMany = vi.fn(
+    async ({
+      where,
+      data,
+    }: {
+      where: {
+        id: string;
+        status: GraphSubscriptionStatus;
+        expirationDateTime: { lte: Date };
+        updatedAt?: { lt: Date };
+      };
+      data: { status: GraphSubscriptionStatus };
+    }) => {
+      const row = rows.find(
+        (r) =>
+          r.id === where.id &&
+          r.status === where.status &&
+          r.expirationDateTime.getTime() <= where.expirationDateTime.lte.getTime() &&
+          (where.updatedAt === undefined ||
+            r.updatedAt.getTime() < where.updatedAt.lt.getTime()),
+      );
+      if (!row) return { count: 0 };
+      row.status = data.status;
+      return { count: 1 };
     },
   );
-  return { prisma: { graphSubscription: { findFirst } }, findFirst };
+
+  return {
+    prisma: { graphSubscription: { findMany, updateMany } },
+    findMany,
+    updateMany,
+    rows,
+  };
 }
 
 function fakeCreatePort(
@@ -262,9 +294,10 @@ describe('fail-open behavior (never throws, no retry)', () => {
     const create = fakeCreatePort();
     const prisma = {
       graphSubscription: {
-        findFirst: vi.fn(async () => {
+        findMany: vi.fn(async () => {
           throw new Error('db unreachable');
         }),
+        updateMany: vi.fn(async () => ({ count: 0 })),
       },
     };
 
@@ -279,7 +312,7 @@ describe('fail-open behavior (never throws, no retry)', () => {
 
   it('missing mailboxId or accessToken → outcome failed without any side effect', async () => {
     const create = fakeCreatePort();
-    const { prisma, findFirst } = fakeEnsurePrisma([]);
+    const { prisma, findMany } = fakeEnsurePrisma([]);
 
     const noMailbox = await ensureInboxSubscriptionForConnectedMailbox(
       { mailboxId: '  ', accessToken: ACCESS_TOKEN },
@@ -293,7 +326,7 @@ describe('fail-open behavior (never throws, no retry)', () => {
     expect(noMailbox.outcome).toBe('failed');
     expect(noToken.outcome).toBe('failed');
     expect(create).not.toHaveBeenCalled();
-    expect(findFirst).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
   });
 
   it('does not log the access token on failure', async () => {
