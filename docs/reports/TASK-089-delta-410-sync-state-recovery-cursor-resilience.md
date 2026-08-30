@@ -1,7 +1,10 @@
 # TASK-089 — Delta 410 SyncStateNotFound Recovery & Cursor Resilience (Phase 1 Report)
 
-> **PHASE 2 HOÀN TẤT (OPTION B++) — ANTIGRAVITY FINAL IMPLEMENTATION REVIEW: PASS.**
-> **ROADMAP CLOSE-OUT ĐANG CHỜ REVIEW — NO COMMIT / NO PUSH.**
+> **TASK-089 COMPLETED.**
+>
+> Quality gates đầy đủ: Final Architecture Re-review PASS → Final Implementation Review PASS →
+> ROADMAP close-out → controlled ff-promotion vào branch `staging` (TASK-088, CASE 1) →
+> **PASS — TASK-089 STAGING RUNTIME VALIDATION APPROVED** (mục O dưới đây, task file §25).
 >
 > Correction số liệu sau review: **23** tests mới (không phải 21 như draft — lỗi đếm tài liệu,
 > vitest xác nhận 23, khớp tổng 1281 → 1304).
@@ -9,7 +12,8 @@
 > Antigravity Final Architecture Re-review: **PASS — TASK-089 FINAL ARCHITECTURE APPROVED FOR
 > PHASE 2 IMPLEMENTATION** (architecture bắt buộc: Option B++ replace-on-success + shared leaf
 > freshness policy). Implementation record: task file **§24**, tóm tắt ở mục **N** dưới đây.
-> `npm run verify` PASS — **105 test files / 1304 tests**. ROADMAP chưa cập nhật; không Railway.
+> `npm run verify` PASS — **105 test files / 1304 tests**. Sau đó: ROADMAP close-out + promotion
+> staging theo TASK-088 + staging validation PASS (mục O).
 >
 > Antigravity Architecture Review lần đầu: **PASS**. HD-1: không khóa Option A ⇒ điều tra
 > **Option B+** (task file §22, mục L). HD-2: kiểm tra "replace invalid cursor only after
@@ -350,10 +354,34 @@ Railway: không thao tác ở Phase 2; promotion sau này có thể redeploy nhi
 5. Sanitization: không cursor/Location/token/code/body trong log/metadata.
 ```
 
+## O. Staging runtime validation — PASS (chi tiết: task file §25)
+
+```text
+Verdict: PASS — TASK-089 STAGING RUNTIME VALIDATION APPROVED (Antigravity CLI).
+
+Promotion : ff-only vào branch staging (TASK-088), staging HEAD = approved commit,
+            GitHub Actions staging PASS, Railway source không đổi, CASE 1 — không migration.
+Runtime   : Email worker / Delta polling / Queue-Redis / Telegram reliability đều PASS;
+            fresh verification email relay thành công; không historical-email replay bất thường;
+            queue backlog TỰ DRAIN 2473 → 1157 → 766 → 366 → 0 (waiting/active/delayed/
+            oldest-waiting = 0) không cần restart/redeploy thủ công; KHÔNG TASK-089 regression.
+
+410 limitation (trung thực): 410 recovery was validated deterministically; no natural
+provider-side 410 occurred during the staging observation window. Không tạo synthetic 410
+bằng cách sửa DB cursor. Live 410 recovery chưa được quan sát — bảo đảm đến từ 23 focused
+deterministic tests + architecture review chain.
+
+Remaining observation: một mailbox HTTP 403 ErrorQuotaExceeded — existing TASK-071/075
+forbidden path hoạt động đúng (counter/cooldown/alert), không RECONNECT_REQUIRED, không block
+mailbox khác, không worker-delta stuck, KHÔNG phải TASK-089 regression; root cause provider-side
+cần Human kiểm tra mailbox/Exchange quota ngoài repo. Phân loại: EXISTING / INDEPENDENT
+OPERATIONAL OBSERVATION — không mở scope, không tự gán task mới.
+```
+
 ---
 
 ```text
-KẾT LUẬN PHASE 2:
-READY FOR ANTIGRAVITY IMPLEMENTATION REVIEW — NO COMMIT / NO PUSH.
-TASK-089 chưa completed; ROADMAP chưa cập nhật; không thao tác Railway.
+KẾT LUẬN: TASK-089 COMPLETED — toàn bộ quality gates PASS
+(Architecture Re-review, Implementation Review, Staging Runtime Validation).
+Architecture B++ và implementation history giữ nguyên, không viết lại.
 ```

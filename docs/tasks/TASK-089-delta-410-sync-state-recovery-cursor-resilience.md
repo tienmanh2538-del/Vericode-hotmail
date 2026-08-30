@@ -1,7 +1,11 @@
 # TASK-089 — Microsoft Graph Delta 410 SyncStateNotFound Recovery & Cursor Resilience
 
-> **TRẠNG THÁI: PHASE 2 HOÀN TẤT — ANTIGRAVITY FINAL IMPLEMENTATION REVIEW: PASS —
-> TASK-089 IMPLEMENTATION APPROVED. ROADMAP CLOSE-OUT ĐANG CHỜ REVIEW. NO COMMIT / NO PUSH.**
+> **TRẠNG THÁI: TASK-089 COMPLETED.**
+>
+> Chuỗi quality gates đầy đủ: Antigravity Final Architecture Re-review PASS → Antigravity Final
+> Implementation Review PASS → ROADMAP close-out → controlled ff-promotion vào branch `staging`
+> (TASK-088, CASE 1) → **Antigravity Staging Runtime Validation PASS** — evidence ở **§25**.
+> Architecture B++ và implementation history (§1–§24) giữ nguyên, không viết lại.
 >
 > Correction số liệu sau Implementation Review: file test mới có **23** test case (đếm chính
 > thức bằng vitest; draft trước ghi nhầm 21 — lỗi đếm tài liệu, không phải thay đổi test).
@@ -9,7 +13,7 @@
 > Antigravity Final Architecture Re-review: **PASS — TASK-089 FINAL ARCHITECTURE APPROVED FOR
 > PHASE 2 IMPLEMENTATION**. Architecture bắt buộc: **OPTION B++ — REPLACE-ON-SUCCESS WITH SHARED
 > LEAF FRESHNESS POLICY**. Implementation thực tế ghi ở **§24**. `npm run verify` PASS
-> (105 test files / 1304 tests). Chưa commit/push, chưa ROADMAP, không thao tác Railway.
+> (105 test files / 1304 tests). Sau đó đã close-out ROADMAP và promotion theo TASK-088 (§25).
 >
 > Lịch sử correction:
 > * Antigravity Architecture Review lần đầu **PASS**; Human/ChatGPT ra **HD-1** (không khóa
@@ -1346,4 +1350,63 @@ npm run verify   : PASS (exit 0) — 105 test files / 1304 tests (tăng từ 104
                    lint + typecheck + build sạch. Toàn bộ suite 401/403/timeout/scheduler/
                    stale/dedup hiện có giữ PASS.
 git diff --check : sạch. Secret-scan pattern CI trên docs + diff: không match.
+```
+
+---
+
+## 25. STAGING RUNTIME VALIDATION (Human-observed + Antigravity xác nhận) — PASS
+
+> Verdict: **PASS — TASK-089 STAGING RUNTIME VALIDATION APPROVED** (Antigravity CLI).
+> Evidence sanitized — không mailbox email thật, không cursor/URL/token/code/email body.
+
+### 25.1. Promotion & deployment (theo đúng quy trình TASK-088)
+
+```text
+[x] Controlled fast-forward promotion vào dedicated branch staging thành công.
+[x] Staging HEAD = đúng approved TASK-089 commit (reviewed == promoted == deployed).
+[x] GitHub Actions trên branch staging PASS (Wait-for-CI đứng trước deploy).
+[x] Railway source KHÔNG thay đổi khỏi branch staging.
+[x] TASK-089 là CASE 1 — không migration ⇒ không preflight cần thiết.
+```
+
+### 25.2. Runtime validation kết quả
+
+```text
+[x] Email worker pipeline:      PASS
+[x] Delta polling:              PASS
+[x] Queue / Redis:              PASS
+[x] Telegram reliability:       PASS
+[x] Fresh verification email relay thành công sau deployment.
+[x] KHÔNG historical-email replay bất thường.
+[x] Queue backlog tồn đọng TỰ DRAIN: 2473 → 1157 → 766 → 366 → 0
+    (cuối cùng waiting/active/delayed/oldest-waiting đều = 0);
+    KHÔNG cần restart/redeploy thủ công nào để queue hồi phục.
+[x] KHÔNG phát hiện TASK-089 regression.
+```
+
+### 25.3. HTTP 410 limitation (ghi trung thực)
+
+```text
+Trong staging observation window KHÔNG xuất hiện HTTP 410 / SyncStateNotFound tự nhiên từ
+provider. KHÔNG chỉnh/xóa DB cursor để tạo synthetic 410 (đúng nguyên tắc không thao tác DB).
+
+410 recovery was validated deterministically; no natural provider-side 410 occurred during
+the staging observation window.
+
+⇒ Live 410 recovery CHƯA được quan sát trên staging — bảo đảm hiện tại đến từ 23 focused
+deterministic tests (§24.4) + architecture review chuỗi HD-1/HD-2. Khi một 410 tự nhiên xảy ra
+trong vận hành, operator có thể xác nhận qua marker GRAPH_SYNC_STATE_LOST / recovery log (§24.2).
+```
+
+### 25.4. Independent observation — HTTP 403 ErrorQuotaExceeded
+
+```text
+Một mailbox gặp HTTP 403 code=ErrorQuotaExceeded lặp lại trong window. Investigation (read-only)
+xác nhận: thuộc EXISTING TASK-071/TASK-075 forbidden path; persistent counter/cooldown/admin
+alert hoạt động ĐÚNG thiết kế; KHÔNG RECONNECT_REQUIRED; KHÔNG block mailbox khác; KHÔNG gây
+worker-delta stuck; KHÔNG phải TASK-089 regression (diff chứng minh đường 403 nguyên trạng).
+Root cause chính xác phía provider cần Human kiểm tra mailbox/Exchange quota ngoài repo.
+
+Phân loại: EXISTING / INDEPENDENT OPERATIONAL OBSERVATION — không mở scope TASK-089 để sửa;
+không tự gán task number mới cho follow-up (Human/ChatGPT quyết định).
 ```
