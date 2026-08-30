@@ -24,12 +24,22 @@ import {
   fetchWithTimeout,
   HttpTimeoutError,
 } from '@/lib/http/fetch-with-timeout';
+import { MAX_RELAY_MESSAGE_AGE_MS } from '@/services/email/relay-freshness-policy';
 import { shouldMarkReconnectRequired } from './refresh-token-failure';
 
 const GRAPH_BASE_URL = 'https://graph.microsoft.com/v1.0';
 const INBOX_DELTA_PATH = "/me/mailFolders('inbox')/messages/delta";
 const DELTA_PAGE_TOP = '50';
 const DEFAULT_MAX_PAGES_PER_MAILBOX = 10;
+
+// TASK-089 — Option B++ sync-state recovery lookback. When Graph invalidates
+// the stored delta cursor (HTTP 410, e.g. SyncStateNotFound), the SAME cycle
+// runs one bounded recovery enumeration that DOES enqueue candidates. Its
+// lookback is DERIVED from the shared relay-freshness policy (TASK-080's
+// 30-minute stale threshold, single source of truth — HD-3): anything older
+// would be terminally skipped by the pipeline's stale guard anyway, so a
+// longer Graph window has zero relay value and only adds pages + noise.
+const SYNC_STATE_RECOVERY_LOOKBACK_MS = MAX_RELAY_MESSAGE_AGE_MS;
 
 // TASK-080 — finite per-request ceiling for every Microsoft HTTP call made on the
 // delta polling path (Graph delta pages here + the token-refresh request wired in
@@ -209,7 +219,12 @@ interface GraphDeltaResponse {
 // minted from a healthy refresh — see the runner's token port), so it must NOT
 // flip the mailbox to RECONNECT_REQUIRED the way a token-endpoint invalid_grant
 // does. Only 401 (token rejected outright) keeps the reconnect semantics.
-type AuthKind = 'auth' | 'forbidden' | 'transient' | 'unknown';
+// TASK-089 — `syncStateLost` (HTTP 410) is its own kind: Graph discarded our
+// delta sync state (e.g. SyncStateNotFound — Outlook delta tokens have no fixed
+// TTL). It is NOT an auth failure and NOT a forbidden failure: it must never
+// touch mailbox status, the forbidden counters, or the cooldown. The HTTP
+// status alone is the trigger; the Graph error code is diagnostics-only.
+type AuthKind = 'auth' | 'forbidden' | 'syncStateLost' | 'transient' | 'unknown';
 
 /** Sanitized diagnostics pulled from a Graph error response (never tokens). */
 interface GraphErrorDiagnostics {
@@ -278,6 +293,11 @@ function classifyHttpStatus(status: number): AuthKind {
   if (status === 401) return 'auth';
   // TASK-071 — 403 on a data request ≠ dead grant → its own kind, never reconnect.
   if (status === 403) return 'forbidden';
+  // TASK-089 — 410 = Graph discarded the delta sync state. Classified by HTTP
+  // status alone (the error code, e.g. SyncStateNotFound, is diagnostics-only
+  // and its casing is not contractual). Retrying the same cursor is useless by
+  // provider contract, so this kind gets its own recovery path.
+  if (status === 410) return 'syncStateLost';
   if (status === 429) return 'transient';
   if (status >= 500 && status <= 599) return 'transient';
   return 'unknown';
@@ -362,7 +382,10 @@ async function fetchDeltaPage(
     throw new DeltaPollingHttpError(
       kind,
       response.status,
-      'GRAPH_REQUEST_FAILED',
+      // TASK-089 — a distinct sanitized marker for sync-state loss so operators
+      // (and the persisted deltaLastErrorMessage) can tell the 410 regime apart
+      // from generic request failures. Never the body, never the Location URL.
+      kind === 'syncStateLost' ? 'GRAPH_SYNC_STATE_LOST' : 'GRAPH_REQUEST_FAILED',
       diagnostics,
     );
   }
@@ -434,9 +457,77 @@ async function pollMailboxDelta(
     bootstrapFromDate: Date;
   },
 ): Promise<PerMailboxPollOutcome> {
+  // TASK-089 refactor note: the page loop moved to `traverseDeltaPages` so the
+  // sync-state recovery path can reuse it with enqueueing enabled. Behavior of
+  // the cursor and first-ever-bootstrap paths is UNCHANGED: an initial
+  // bootstrap (cursor === null) still enumerates WITHOUT enqueueing anything.
   const isBootstrap = mailbox.microsoftDeltaCursor === null;
-  let currentUrl =
+  const startUrl =
     mailbox.microsoftDeltaCursor ?? buildInitialDeltaUrl(deps.bootstrapFromDate);
+
+  const traversal = await traverseDeltaPages(
+    startUrl,
+    !isBootstrap,
+    mailbox,
+    accessToken,
+    deps,
+  );
+
+  if (
+    traversal.deltaLink === null &&
+    traversal.pagesProcessed >= deps.maxPagesPerMailbox
+  ) {
+    deps.logger.warn('Delta polling hit page limit before deltaLink', {
+      mailboxId: mailbox.id,
+      pagesProcessed: traversal.pagesProcessed,
+      bootstrap: isBootstrap,
+    });
+  }
+
+  return {
+    enqueued: traversal.enqueued,
+    newCursor: traversal.deltaLink,
+    bootstrap: isBootstrap,
+  };
+}
+
+/** Dependencies shared by every delta page traversal (poll or recovery). */
+interface DeltaTraversalDeps {
+  fetchImpl: typeof fetch;
+  logger: Logger;
+  now: () => Date;
+  maxPagesPerMailbox: number;
+  enqueue: DeltaPollingEnqueuePort;
+}
+
+interface DeltaTraversalResult {
+  enqueued: number;
+  /** Final @odata.deltaLink, or null when the traversal did not converge. */
+  deltaLink: string | null;
+  pagesProcessed: number;
+}
+
+/**
+ * Walk delta pages from `startUrl` until a final `@odata.deltaLink`, the page
+ * cap, or a defensive stop. Extracted in TASK-089 so the same bounded loop
+ * serves all three modes:
+ *   - normal cursor polling      (shouldEnqueue = true)
+ *   - first-ever bootstrap       (shouldEnqueue = false — the saved cursor is
+ *     what tells the next poll where "new" begins; enumerating silently is the
+ *     core safety property of TASK-031/036)
+ *   - 410 sync-state recovery    (shouldEnqueue = true — replays are safe:
+ *     queue jobId dedup, pipeline early dedup, the TASK-080 stale guard and the
+ *     ProcessedMessage claim all sit downstream)
+ * Intermediate nextLink URLs are NEVER returned or persisted.
+ */
+async function traverseDeltaPages(
+  startUrl: string,
+  shouldEnqueue: boolean,
+  mailbox: DeltaPollingMailbox,
+  accessToken: string,
+  deps: DeltaTraversalDeps,
+): Promise<DeltaTraversalResult> {
+  let currentUrl = startUrl;
   let pagesProcessed = 0;
   let enqueued = 0;
   let deltaLink: string | null = null;
@@ -445,10 +536,7 @@ async function pollMailboxDelta(
     const page = await fetchDeltaPage(currentUrl, accessToken, deps.fetchImpl);
     pagesProcessed += 1;
 
-    // During bootstrap we INTENTIONALLY do not enqueue any pre-existing
-    // messages — the cursor we save below is what tells the next poll where
-    // "new" begins. This is the core safety property of the task.
-    if (!isBootstrap) {
+    if (shouldEnqueue) {
       const items = page.value ?? [];
       for (const item of items) {
         if (!isValidMessageItem(item)) continue;
@@ -483,19 +571,152 @@ async function pollMailboxDelta(
     break;
   }
 
-  if (deltaLink === null && pagesProcessed >= deps.maxPagesPerMailbox) {
-    deps.logger.warn('Delta polling hit page limit before deltaLink', {
+  return { enqueued, deltaLink, pagesProcessed };
+}
+
+/**
+ * TASK-089 — Option B++ same-cycle sync-state recovery (replace-on-success).
+ *
+ * Invoked when a CURSOR request came back HTTP 410: Graph discarded our delta
+ * sync state, so retrying the stored cursor as normal processing is useless by
+ * provider contract. The persisted cursor (C-invalid) is deliberately KEPT in
+ * the DB as the durable recovery trigger — this function never resets it, never
+ * persists null and never persists an intermediate nextLink.
+ *
+ * Exactly ONE bounded recovery enumeration runs in the same cycle, starting
+ * from the initial-query builder with the shared relay-freshness lookback:
+ *   - SUCCESS (final deltaLink C-new reached): saveDeltaCursor(C-new) replaces
+ *     C-invalid directly (the writer is an unconditional update) and clears the
+ *     delta error metadata via the existing successful-save semantics.
+ *   - FAILURE (second 410 / timeout / 429 / 5xx / page cap before deltaLink):
+ *     C-invalid stays persisted, a sanitized failure marker is recorded, the
+ *     cycle settles, and the NEXT scheduler tick repeats one probe → one
+ *     recovery attempt. No recursion, no second attempt in the same cycle.
+ *
+ * Real 401/403 raised DURING the recovery request keep their existing
+ * semantics (reconnect / TASK-071+TASK-075 forbidden handling) — delegated
+ * verbatim, never reinterpreted. Never throws.
+ */
+async function handleSyncStateLost(
+  mailbox: DeltaPollingMailbox,
+  accessToken: string,
+  error: DeltaPollingHttpError,
+  occurredAt: Date,
+  deps: DeltaTraversalDeps & {
+    repo: DeltaPollingMailboxRepo;
+    alert?: DeltaPollingAlertPort;
+    forbiddenBackoffThreshold: number;
+  },
+): Promise<{ recovered: boolean; enqueued: number }> {
+  // Persist the sanitized sync-state-lost marker FIRST so the operator (and a
+  // crash-restart) can see the mailbox entered the 410-recovery regime. A
+  // successful save below clears it (existing saveDeltaCursor semantics).
+  await safelyRecordError(
+    mailbox.id,
+    safeErrorMessage(error),
+    occurredAt,
+    deps.repo,
+    deps.logger,
+  );
+  deps.logger.info('Delta polling sync state lost — running same-cycle recovery', {
+    mailboxId: mailbox.id,
+    emailAddressMasked: maskEmail(mailbox.emailAddress),
+    httpStatus: error.httpStatus,
+  });
+
+  let traversal: DeltaTraversalResult;
+  try {
+    const recoveryFromDate = new Date(
+      deps.now().getTime() - SYNC_STATE_RECOVERY_LOOKBACK_MS,
+    );
+    traversal = await traverseDeltaPages(
+      buildInitialDeltaUrl(recoveryFromDate),
+      true,
+      mailbox,
+      accessToken,
+      deps,
+    );
+  } catch (recoveryError) {
+    // ONE-SHOT: any failure ends the attempt for this cycle — no recursion, no
+    // second enumeration. C-invalid stays persisted so the next tick retries.
+    if (
+      recoveryError instanceof DeltaPollingHttpError &&
+      recoveryError.kind === 'auth'
+    ) {
+      // Real 401 semantics untouched: token rejected outright → reconnect.
+      await safelyMarkReconnectRequired(mailbox.id, deps.repo, deps.logger);
+      await safelyRecordError(
+        mailbox.id,
+        safeErrorMessage(recoveryError),
+        occurredAt,
+        deps.repo,
+        deps.logger,
+      );
+    } else if (
+      recoveryError instanceof DeltaPollingHttpError &&
+      recoveryError.kind === 'forbidden'
+    ) {
+      // Real 403 semantics untouched: the TASK-071 self-heal + TASK-075
+      // backoff own the forbidden regime from here (including the cursor
+      // reset that TASK-071 defines for a stored cursor).
+      await handlePersistentForbidden(mailbox, recoveryError, occurredAt, {
+        repo: deps.repo,
+        alert: deps.alert,
+        logger: deps.logger,
+        threshold: deps.forbiddenBackoffThreshold,
+      });
+    } else {
+      // Second 410 / timeout / 429 / 5xx / unknown — controlled failure.
+      await safelyRecordError(
+        mailbox.id,
+        `SYNC_STATE_RECOVERY_FAILED:${safeErrorMessage(recoveryError)}`,
+        occurredAt,
+        deps.repo,
+        deps.logger,
+      );
+    }
+    deps.logger.warn('Delta polling sync-state recovery attempt failed', {
       mailboxId: mailbox.id,
-      pagesProcessed,
-      bootstrap: isBootstrap,
+      emailAddressMasked: maskEmail(mailbox.emailAddress),
+      errorName:
+        recoveryError instanceof Error ? recoveryError.name : 'UnknownError',
     });
+    return { recovered: false, enqueued: 0 };
   }
 
-  return {
-    enqueued,
-    newCursor: deltaLink,
-    bootstrap: isBootstrap,
-  };
+  if (traversal.deltaLink === null) {
+    // MANDATORY page-cap guard: a partial enumeration is NOT a successful
+    // recovery. Never fabricate a cursor, never persist an intermediate
+    // nextLink — keep C-invalid and retry next tick.
+    await safelyRecordError(
+      mailbox.id,
+      'SYNC_STATE_RECOVERY_INCOMPLETE:page_cap_before_deltaLink',
+      occurredAt,
+      deps.repo,
+      deps.logger,
+    );
+    deps.logger.warn('Delta polling sync-state recovery did not reach deltaLink', {
+      mailboxId: mailbox.id,
+      emailAddressMasked: maskEmail(mailbox.emailAddress),
+      pagesProcessed: traversal.pagesProcessed,
+    });
+    return { recovered: false, enqueued: traversal.enqueued };
+  }
+
+  // Replace-on-success: C-new overwrites C-invalid directly and clears the
+  // delta error metadata (existing writer semantics). No reset-to-null ever.
+  try {
+    await deps.repo.saveDeltaCursor(mailbox.id, traversal.deltaLink, occurredAt);
+  } catch (saveError) {
+    deps.logger.warn('Delta polling failed to save recovered cursor', {
+      mailboxId: mailbox.id,
+      errorName: saveError instanceof Error ? saveError.name : 'UnknownError',
+    });
+    // C-invalid is still persisted → the next tick re-runs recovery.
+    return { recovered: false, enqueued: traversal.enqueued };
+  }
+
+  return { recovered: true, enqueued: traversal.enqueued };
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +791,11 @@ export async function runDeltaPollingOnce(
       continue;
     }
 
+    // TASK-089 — the access token minted for this mailbox is also needed by the
+    // sync-state recovery branch in the catch below (a 410 arrives AFTER a
+    // healthy token exchange, so reusing it for the same-cycle recovery request
+    // is correct). Hoisted so the catch can see it; null until minted.
+    let tokenForRecovery: string | null = null;
     try {
       let accessToken: string;
       try {
@@ -593,6 +819,8 @@ export async function runDeltaPollingOnce(
         result.failedMailboxCount += 1;
         continue;
       }
+
+      tokenForRecovery = accessToken;
 
       const bootstrapFromDate = new Date(
         startedAt.getTime() - bootstrapLookbackHours * MS_PER_HOUR,
@@ -638,6 +866,55 @@ export async function runDeltaPollingOnce(
         cursorAdvanced: outcome.newCursor !== null,
       });
     } catch (error) {
+      // TASK-089 — Option B++ replace-on-success sync-state recovery. HTTP 410
+      // on a CURSOR request means Graph discarded our sync state. The persisted
+      // cursor (C-invalid) is deliberately KEPT as the durable recovery trigger
+      // — never reset to null, never a status/forbidden change. The same cycle
+      // runs exactly ONE bounded recovery enumeration; on success the new
+      // deltaLink replaces the invalid cursor directly and clears the error
+      // metadata. On failure C-invalid stays put and the NEXT scheduler tick
+      // repeats one probe → one recovery attempt. A 410 during an initial
+      // bootstrap (cursor === null: nothing was lost, no baseline existed)
+      // deliberately falls through to the generic error-record branch below.
+      if (
+        error instanceof DeltaPollingHttpError &&
+        error.kind === 'syncStateLost' &&
+        tokenForRecovery !== null &&
+        mailbox.microsoftDeltaCursor !== null
+      ) {
+        const recovery = await handleSyncStateLost(
+          mailbox,
+          tokenForRecovery,
+          error,
+          startedAt,
+          {
+            fetchImpl,
+            logger,
+            now,
+            maxPagesPerMailbox,
+            enqueue: deps.enqueue,
+            repo: deps.repo,
+            alert: deps.alert,
+            forbiddenBackoffThreshold,
+          },
+        );
+        result.enqueuedMessageCount += recovery.enqueued;
+        if (recovery.recovered) {
+          // A successful recovery is a successful poll: clear any prior
+          // forbidden streak exactly like the normal success path does.
+          if (hasForbiddenState(mailbox)) {
+            await safelyClearForbiddenBackoff(mailbox.id, deps.repo, logger);
+          }
+          logger.info('Delta polling recovered lost sync state', {
+            mailboxId: mailbox.id,
+            emailAddressMasked: maskEmail(mailbox.emailAddress),
+            enqueued: recovery.enqueued,
+          });
+        } else {
+          result.failedMailboxCount += 1;
+        }
+        continue;
+      }
       result.failedMailboxCount += 1;
       if (error instanceof DeltaPollingHttpError && error.kind === 'auth') {
         // HTTP 401 on the data request: the access token was rejected outright →
@@ -876,6 +1153,8 @@ export const __internal = {
   DEFAULT_FORBIDDEN_BACKOFF_THRESHOLD,
   FORBIDDEN_BACKOFF_BASE_MS,
   FORBIDDEN_BACKOFF_MAX_MS,
+  // TASK-089 — recovery lookback (derived from the shared relay-freshness policy).
+  SYNC_STATE_RECOVERY_LOOKBACK_MS,
   forbiddenBackoffMs,
   buildInitialDeltaUrl,
   isValidMessageItem,

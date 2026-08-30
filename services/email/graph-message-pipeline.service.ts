@@ -55,16 +55,20 @@ import {
   type WorkerMetricsRecorder,
 } from '@/services/observability/worker-metrics';
 import { createLogger, type Logger } from '@/lib/logger';
-
-const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
-
 // TASK-080 — max age of a verification email (measured against the Microsoft Graph
 // source `receivedDateTime`) that may still be relayed to Telegram. A message
 // older than this at processing time is treated as stale and never sent — this
 // protects against a backlog of expired codes being drained after a worker outage
-// (see TASK-079). Single source of truth; intentionally NOT env-tunable in TASK-080.
-const MAX_RELAY_MESSAGE_AGE_MINUTES = 30;
-const MAX_RELAY_MESSAGE_AGE_MS = MAX_RELAY_MESSAGE_AGE_MINUTES * 60 * 1000;
+// (see TASK-079). Intentionally NOT env-tunable.
+// TASK-089 (HD-3) — the constants moved to the shared LEAF policy module so the
+// delta 410 recovery lookback can share the single source of truth without
+// importing this high-level pipeline module. Values/behavior unchanged (30m).
+import {
+  MAX_RELAY_MESSAGE_AGE_MINUTES,
+  MAX_RELAY_MESSAGE_AGE_MS,
+} from './relay-freshness-policy';
+
+const FACEBOOK_DETECTOR_PASS_THRESHOLD = 70;
 
 export type GraphMessagePipelineStatus =
   | 'CODE_SENT'
