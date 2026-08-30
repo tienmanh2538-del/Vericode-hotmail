@@ -321,7 +321,16 @@ export async function processMockEmail(
 
     const sentAt = (deps.now ?? (() => new Date()))();
     try {
-      await markMessageAsSent(processedMessageId, deps.store, sentAt);
+      // TASK-090 — pass the delivery-owner token from the claim so the SENT
+      // write goes through the same fenced (conditional) store path as the
+      // worker pipeline. The mock flow has no concurrent delivery claimants,
+      // so the condition always matches its own claim.
+      await markMessageAsSent(
+        processedMessageId,
+        deps.store,
+        sentAt,
+        dedupe.deliveryOwnerToken,
+      );
     } catch {
       // Telegram already received the message; failing to record SENT is a
       // bookkeeping issue, not a user-facing failure.

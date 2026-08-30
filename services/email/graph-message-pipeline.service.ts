@@ -15,8 +15,12 @@
 //     masked code, never the plaintext.
 
 import {
+  acquireDeliveryOwnership,
   claimMessageForProcessing,
+  isDeliveryRecoverableRow,
   markMessageAsSent,
+  type DeliveryOwnershipAcquisition,
+  type ProcessedMessageRecord,
   type ProcessedMessageStore,
 } from './deduplication.service';
 import { extractVerificationCode } from './code-extractor.service';
@@ -86,7 +90,17 @@ export type GraphMessagePipelineStatus =
   // Graph/Telegram concurrently with the in-flight job.
   | 'DEFERRED_MAILBOX_BUSY'
   | 'FAILED_GRAPH_FETCH'
+  // Retryable/transient Telegram failure whose bounded internal retries
+  // (TASK-033) were exhausted. The worker throws so BullMQ re-attempts, and
+  // TASK-090's delivery-ownership recovery lets that re-attempt actually reach
+  // the send path again (the delivery lease was released on this known
+  // failure, and early dedup no longer terminal-skips an unfinished row).
   | 'FAILED_TELEGRAM_SEND'
+  // TASK-090 (DF-90-4) — permanent/non-retryable Telegram failure (e.g.
+  // 400/403/404, validation, config). The row is terminally FAILED and the
+  // worker RETURNS this status (never throws), so no BullMQ attempt is wasted
+  // and the message is never auto-retried.
+  | 'FAILED_TELEGRAM_PERMANENT'
   | 'FAILED_RECONNECT_REQUIRED'
   // TASK-069C — a TRANSIENT token-refresh failure (network/timeout/429/5xx). The
   // job is retryable but the mailbox is deliberately NOT flagged
@@ -695,14 +709,26 @@ async function processActiveMailboxJob(
   const bodyPreview = message.bodyPreview ?? undefined;
 
   // Step 4: early dedup on message identity.
+  //
+  // TASK-090 — STATUS-AWARE. A row that reached a TERMINAL outcome (SENT, or
+  // FAILED) is a duplicate skip exactly as before. A row whose delivery never
+  // finished (status DETECTED — the S1/S2 permanent-loss window this task
+  // fixes) is NOT terminal-skipped any more: it is carried forward as a
+  // recovery candidate and must still pass the TASK-080 stale guard, the
+  // detector/extractor, and the atomic delivery-ownership CAS (Step 8) before
+  // any Telegram send. The DB unique identity constraint and the TASK-068A
+  // P2002 backstop are untouched.
+  let recoveryRow: ProcessedMessageRecord | null = null;
+
   const earlyExisting = await deps.store.findByGraphMessageId(
     mailbox.id,
     normalized.graphMessageId,
   );
-  if (earlyExisting) {
+  if (earlyExisting && !isDeliveryRecoverableRow(earlyExisting)) {
     logger.info('Graph message job skipped: duplicate (graph message id)', {
       mailboxId: mailbox.id,
       processedMessageId: earlyExisting.id,
+      rowStatus: earlyExisting.status,
     });
     safeRecordCodeEvent(
       audit,
@@ -712,7 +738,10 @@ async function processActiveMailboxJob(
         status: 'CODE_SKIPPED_DUPLICATE',
         source: 'webhook',
         receivedAt,
-        message: 'Duplicate Graph message id',
+        message:
+          earlyExisting.status === 'FAILED'
+            ? 'Duplicate Graph message id (terminal failed)'
+            : 'Duplicate Graph message id',
       },
       logger,
     );
@@ -721,18 +750,47 @@ async function processActiveMailboxJob(
       status: 'SKIPPED_DUPLICATE',
       ...baseResultKeys,
       sentToTelegram: false,
-      reason: 'duplicate_graph_message_id',
+      reason:
+        earlyExisting.status === 'FAILED'
+          ? 'duplicate_terminal_failed'
+          : 'duplicate_graph_message_id',
     };
+  }
+  if (earlyExisting) {
+    recoveryRow = earlyExisting;
   }
   if (internetMessageId) {
     const earlyImid = await deps.store.findByInternetMessageId(
       mailbox.id,
       internetMessageId,
     );
-    if (earlyImid) {
+    if (
+      earlyImid &&
+      earlyImid.id !== recoveryRow?.id &&
+      !isDeliveryRecoverableRow(earlyImid)
+    ) {
+      // The SAME email already reached a terminal outcome under another row
+      // identity. Best-effort terminalize our unfinished row (if any) so it
+      // can never become a duplicate-delivery candidate later; the write is
+      // conditional (unclaimed rows only) so it can never steal a live owner.
+      if (recoveryRow) {
+        try {
+          await deps.store.markFailedIfUnclaimed({
+            processedMessageId: recoveryRow.id,
+            reason: 'duplicate_identity_terminal',
+            now: now(),
+          });
+        } catch {
+          logger.warn('Failed to terminalize duplicate-identity row', {
+            mailboxId: mailbox.id,
+            processedMessageId: recoveryRow.id,
+          });
+        }
+      }
       logger.info('Graph message job skipped: duplicate (internet message id)', {
         mailboxId: mailbox.id,
         processedMessageId: earlyImid.id,
+        rowStatus: earlyImid.status,
       });
       safeRecordCodeEvent(
         audit,
@@ -754,6 +812,9 @@ async function processActiveMailboxJob(
         reason: 'duplicate_internet_message_id',
       };
     }
+    if (!recoveryRow && earlyImid) {
+      recoveryRow = earlyImid;
+    }
   }
 
   // TASK-080 — stale verification message relay protection. Placed AFTER the
@@ -767,6 +828,25 @@ async function processActiveMailboxJob(
   if (sourceReceivedAt !== null) {
     const ageMs = now().getTime() - sourceReceivedAt.getTime();
     if (ageMs > MAX_RELAY_MESSAGE_AGE_MS) {
+      // TASK-090 — a recovery candidate that has gone stale is terminalized
+      // (conditional: unclaimed rows only, never stealing a live owner) so it
+      // stops being a recovery candidate. This is also what keeps historical
+      // pre-migration DETECTED rows safe: any touch lands here and terminally
+      // marks them instead of re-delivering an old verification message.
+      if (recoveryRow) {
+        try {
+          await deps.store.markFailedIfUnclaimed({
+            processedMessageId: recoveryRow.id,
+            reason: 'stale_before_delivery',
+            now: now(),
+          });
+        } catch {
+          logger.warn('Failed to terminalize stale recovery row', {
+            mailboxId: mailbox.id,
+            processedMessageId: recoveryRow.id,
+          });
+        }
+      }
       logger.info('Graph message job skipped: stale verification message', {
         mailboxId: mailbox.id,
         ageMinutes: Math.round(ageMs / 60_000),
@@ -949,70 +1029,201 @@ async function processActiveMailboxJob(
   const code = extraction.code;
   const maskedCode = extraction.maskedCode;
 
-  // Step 8: claim the message for processing (covers code+bucket dedup).
-  const dedupe = await claimMessageForProcessing(
-    {
-      mailboxId: mailbox.id,
-      graphMessageId: normalized.graphMessageId,
-      internetMessageId,
-      receivedAt,
-      senderEmail: fromAddress,
-      subject,
-      verificationCode: code,
-    },
-    deps.store,
-  );
+  // Step 8: message-identity claim + delivery-ownership claim (TASK-090).
+  //
+  // These are two DIFFERENT claims:
+  //   - IDENTITY claim — the unique-constraint INSERT (TASK-068A). Exactly one
+  //     producer flow creates the row; P2002 means "row already exists", which
+  //     is no longer the same thing as "already delivered".
+  //   - DELIVERY-OWNERSHIP claim — an atomic conditional lease on the row.
+  //     Exactly one claimant at a time may run the send path. A fresh INSERT
+  //     takes the initial lease atomically; an existing unfinished row goes
+  //     through the CAS in `acquireDeliveryOwnership`.
+  const sleep = deps.sleep ?? defaultSleep;
+  let processedMessageId: string | null = null;
+  let deliveryOwnerToken: string | null = null;
 
-  if (dedupe.isDuplicate) {
-    logger.info('Graph message job skipped: duplicate (code/bucket)', {
-      mailboxId: mailbox.id,
-      reason: dedupe.reason,
-    });
-    safeRecordCodeEvent(
-      audit,
+  if (recoveryRow === null) {
+    const dedupe = await claimMessageForProcessing(
       {
-        mailboxEmail: mailbox.emailAddress,
-        customerName: mailbox.customerName ?? undefined,
-        status: 'CODE_SKIPPED_DUPLICATE',
-        maskedCode,
-        confidence: detection.confidenceScore,
-        source: 'webhook',
+        mailboxId: mailbox.id,
+        graphMessageId: normalized.graphMessageId,
+        internetMessageId,
         receivedAt,
-        message: dedupe.reason,
+        senderEmail: fromAddress,
+        subject,
+        verificationCode: code,
       },
-      logger,
+      deps.store,
+      { now },
     );
-    safeCreateAuditLog(
-      audit,
-      {
-        action: 'CODE_DUPLICATE_SKIPPED',
-        entityType: 'code_event',
-        entityId: mailbox.id,
-        severity: 'notice',
-        summary: 'Duplicate verification code skipped',
-        metadata: {
+
+    if (dedupe.isDuplicate) {
+      // TASK-090 — a concurrent flow won the INSERT between our early dedup
+      // and our claim. If that racing row is an UNFINISHED identity match, it
+      // becomes our recovery candidate (typically we then lose the ownership
+      // CAS to the live winner and skip — but if the winner crashes, this path
+      // is exactly what recovers the message). Terminal rows and code-bucket
+      // duplicates (a DIFFERENT email identity) keep the existing skip.
+      const identityRace =
+        dedupe.reason === 'DUPLICATE_GRAPH_MESSAGE_ID' ||
+        dedupe.reason === 'DUPLICATE_INTERNET_MESSAGE_ID';
+      const racedRow =
+        identityRace && dedupe.processedMessageId
+          ? await deps.store.findById(dedupe.processedMessageId)
+          : null;
+      if (racedRow && isDeliveryRecoverableRow(racedRow)) {
+        recoveryRow = racedRow;
+      } else {
+        logger.info('Graph message job skipped: duplicate (code/bucket)', {
           mailboxId: mailbox.id,
           reason: dedupe.reason,
-        },
-      },
-      logger,
-    );
-    return {
-      ok: false,
-      status: 'SKIPPED_DUPLICATE',
-      ...baseResultKeys,
-      detectorConfidence: detection.confidenceScore,
-      maskedCode,
-      sentToTelegram: false,
-      reason: dedupe.reason,
-    };
+        });
+        safeRecordCodeEvent(
+          audit,
+          {
+            mailboxEmail: mailbox.emailAddress,
+            customerName: mailbox.customerName ?? undefined,
+            status: 'CODE_SKIPPED_DUPLICATE',
+            maskedCode,
+            confidence: detection.confidenceScore,
+            source: 'webhook',
+            receivedAt,
+            message: dedupe.reason,
+          },
+          logger,
+        );
+        safeCreateAuditLog(
+          audit,
+          {
+            action: 'CODE_DUPLICATE_SKIPPED',
+            entityType: 'code_event',
+            entityId: mailbox.id,
+            severity: 'notice',
+            summary: 'Duplicate verification code skipped',
+            metadata: {
+              mailboxId: mailbox.id,
+              reason: dedupe.reason,
+            },
+          },
+          logger,
+        );
+        return {
+          ok: false,
+          status: 'SKIPPED_DUPLICATE',
+          ...baseResultKeys,
+          detectorConfidence: detection.confidenceScore,
+          maskedCode,
+          sentToTelegram: false,
+          reason: dedupe.reason,
+        };
+      }
+    } else if (
+      !dedupe.shouldProcess ||
+      !dedupe.processedMessageId ||
+      !dedupe.deliveryOwnerToken
+    ) {
+      logger.warn('Graph message job: dedupe could not claim message', {
+        mailboxId: mailbox.id,
+        reason: dedupe.reason,
+      });
+      return {
+        ok: false,
+        status: 'FAILED_UNEXPECTED',
+        ...baseResultKeys,
+        detectorConfidence: detection.confidenceScore,
+        maskedCode,
+        sentToTelegram: false,
+        reason: dedupe.reason,
+      };
+    } else {
+      processedMessageId = dedupe.processedMessageId;
+      deliveryOwnerToken = dedupe.deliveryOwnerToken;
+    }
   }
 
-  if (!dedupe.shouldProcess || !dedupe.processedMessageId) {
-    logger.warn('Graph message job: dedupe could not claim message', {
-      mailboxId: mailbox.id,
-      reason: dedupe.reason,
-    });
+  if (recoveryRow !== null) {
+    // TASK-090 — atomic delivery-ownership CAS on the existing unfinished row.
+    // The bounded wait inside covers a lease still held by a possibly-crashed
+    // owner; every non-claimed outcome is a TERMINAL skip whose safety rests on
+    // either a terminal row state or a live claimant whose own job (including
+    // its BullMQ stalled retry) drives delivery.
+    let acquisition: DeliveryOwnershipAcquisition;
+    try {
+      acquisition = await acquireDeliveryOwnership(
+        recoveryRow.id,
+        deps.store,
+        { now, sleep },
+      );
+    } catch {
+      logger.warn('Delivery ownership acquisition failed unexpectedly', {
+        mailboxId: mailbox.id,
+        processedMessageId: recoveryRow.id,
+      });
+      return {
+        ok: false,
+        status: 'FAILED_UNEXPECTED',
+        ...baseResultKeys,
+        detectorConfidence: detection.confidenceScore,
+        maskedCode,
+        sentToTelegram: false,
+        reason: 'delivery_ownership_error',
+      };
+    }
+
+    if (acquisition.kind === 'claimed') {
+      processedMessageId = recoveryRow.id;
+      deliveryOwnerToken = acquisition.ownerToken;
+      logger.info('Graph message job re-claimed unfinished delivery', {
+        mailboxId: mailbox.id,
+        processedMessageId: recoveryRow.id,
+      });
+    } else {
+      const skipReason =
+        acquisition.kind === 'already_sent'
+          ? 'duplicate_graph_message_id'
+          : acquisition.kind === 'terminal_failed'
+            ? 'duplicate_terminal_failed'
+            : acquisition.kind === 'budget_exhausted'
+              ? 'delivery_attempts_exhausted'
+              : 'delivery_owned_elsewhere';
+      logger.info('Graph message job skipped: delivery not claimable', {
+        mailboxId: mailbox.id,
+        processedMessageId: recoveryRow.id,
+        outcome: acquisition.kind,
+      });
+      safeRecordCodeEvent(
+        audit,
+        {
+          mailboxEmail: mailbox.emailAddress,
+          customerName: mailbox.customerName ?? undefined,
+          status:
+            acquisition.kind === 'budget_exhausted'
+              ? 'TELEGRAM_SEND_FAILED'
+              : 'CODE_SKIPPED_DUPLICATE',
+          maskedCode,
+          confidence: detection.confidenceScore,
+          source: 'webhook',
+          receivedAt,
+          message: skipReason,
+        },
+        logger,
+      );
+      return {
+        ok: false,
+        status: 'SKIPPED_DUPLICATE',
+        ...baseResultKeys,
+        detectorConfidence: detection.confidenceScore,
+        maskedCode,
+        sentToTelegram: false,
+        reason: skipReason,
+      };
+    }
+  }
+
+  if (processedMessageId === null || deliveryOwnerToken === null) {
+    // Unreachable by construction (every branch above either returned or set
+    // both); kept as a typed guard so the send path always has an owner.
     return {
       ok: false,
       status: 'FAILED_UNEXPECTED',
@@ -1020,11 +1231,61 @@ async function processActiveMailboxJob(
       detectorConfidence: detection.confidenceScore,
       maskedCode,
       sentToTelegram: false,
-      reason: dedupe.reason,
+      reason: 'delivery_ownership_missing',
     };
   }
 
-  const processedMessageId = dedupe.processedMessageId;
+  // TASK-090 — freshness RE-CHECK immediately after ownership acquisition.
+  // The Step-5 stale guard ran before the (bounded but potentially long)
+  // ownership wait, so re-measure against the SAME Graph source timestamp
+  // before any Telegram side effect. A message that crossed the TASK-080
+  // threshold while waiting is terminally failed by its owner — it is never
+  // sent late just because delivery recovery caught up with it.
+  if (sourceReceivedAt !== null) {
+    const postClaimAgeMs = now().getTime() - sourceReceivedAt.getTime();
+    if (postClaimAgeMs > MAX_RELAY_MESSAGE_AGE_MS) {
+      try {
+        await deps.store.markFailedByOwner(
+          processedMessageId,
+          deliveryOwnerToken,
+          'stale_before_delivery',
+        );
+      } catch {
+        logger.warn('Failed to terminalize stale owned delivery', {
+          mailboxId: mailbox.id,
+          processedMessageId,
+        });
+      }
+      logger.info('Graph message job skipped: stale after ownership wait', {
+        mailboxId: mailbox.id,
+        ageMinutes: Math.round(postClaimAgeMs / 60_000),
+        maxAgeMinutes: MAX_RELAY_MESSAGE_AGE_MINUTES,
+      });
+      safeRecordCodeEvent(
+        audit,
+        {
+          mailboxEmail: mailbox.emailAddress,
+          customerName: mailbox.customerName ?? undefined,
+          status: 'CODE_SKIPPED_STALE',
+          maskedCode,
+          confidence: detection.confidenceScore,
+          source: 'webhook',
+          receivedAt,
+          message: `stale_gt_${MAX_RELAY_MESSAGE_AGE_MINUTES}m`,
+        },
+        logger,
+      );
+      return {
+        ok: false,
+        status: 'SKIPPED_STALE',
+        ...baseResultKeys,
+        detectorConfidence: detection.confidenceScore,
+        maskedCode,
+        sentToTelegram: false,
+        reason: 'stale_message',
+      };
+    }
+  }
 
   // Step 9: load Telegram mapping. There is no fallback chat id.
   let mapping: TelegramMappingLookup | null = null;
@@ -1038,6 +1299,18 @@ async function processActiveMailboxJob(
   }
 
   if (!mapping || !isNonEmptyString(mapping.telegramChatId)) {
+    // TASK-090 — release the delivery lease (attempts stay consumed): nothing
+    // was sent, and a mapping added within the freshness window lets a later
+    // duplicate job retry cleanly instead of waiting out this lease. Routing
+    // rules are unchanged — there is still no fallback chat id.
+    try {
+      await deps.store.releaseDelivery(processedMessageId, deliveryOwnerToken);
+    } catch {
+      logger.warn('Failed to release delivery lease (no mapping)', {
+        mailboxId: mailbox.id,
+        processedMessageId,
+      });
+    }
     logger.info('Graph message job skipped: no active Telegram mapping', {
       mailboxId: mailbox.id,
     });
@@ -1131,9 +1404,21 @@ async function processActiveMailboxJob(
   } catch (err: unknown) {
     const reason =
       err instanceof TelegramSendError ? err.kind : 'unknown';
+    // TASK-090 (DF-90-4) — split permanent vs retryable delivery failures.
+    // ONLY an explicit `retryable: false` verdict (attached by the TASK-033
+    // retry adapter from telegram-error.ts) is permanent; anything unclassified
+    // stays on the conservative retryable path (previous behaviour).
+    const isPermanentFailure =
+      err instanceof TelegramSendError && err.retryable === false;
+    const failureCategory =
+      err instanceof TelegramSendError && typeof err.statusCode === 'number'
+        ? `${err.kind}_${err.statusCode}`
+        : reason;
+
     logger.warn('Telegram send failed', {
       mailboxId: mailbox.id,
-      reason,
+      reason: failureCategory,
+      permanent: isPermanentFailure,
     });
     safeRecordCodeEvent(
       audit,
@@ -1146,10 +1431,51 @@ async function processActiveMailboxJob(
         telegramGroupName: mapping.telegramGroupName ?? undefined,
         source: 'webhook',
         receivedAt,
-        message: reason,
+        message: failureCategory,
       },
       logger,
     );
+
+    if (isPermanentFailure) {
+      // Terminal FAILED, fenced on our owner token. The worker RETURNS this
+      // status (no throw), so no BullMQ attempt is burned on an error that a
+      // retry cannot fix, and no later job auto-resends this message.
+      try {
+        await deps.store.markFailedByOwner(
+          processedMessageId,
+          deliveryOwnerToken,
+          failureCategory,
+        );
+      } catch {
+        logger.warn('Failed to mark delivery terminally failed', {
+          mailboxId: mailbox.id,
+          processedMessageId,
+        });
+      }
+      return {
+        ok: false,
+        status: 'FAILED_TELEGRAM_PERMANENT',
+        ...baseResultKeys,
+        detectorConfidence: detection.confidenceScore,
+        maskedCode,
+        sentToTelegram: false,
+        reason,
+      };
+    }
+
+    // Retryable (or unclassified): release the lease NOW — the failure is
+    // known (we caught it), so the next BullMQ attempt may reclaim immediately
+    // instead of waiting out the lease. Attempts stay consumed, keeping the
+    // total budget bounded. The worker throws for this status, which is what
+    // schedules that next attempt.
+    try {
+      await deps.store.releaseDelivery(processedMessageId, deliveryOwnerToken);
+    } catch {
+      logger.warn('Failed to release delivery lease after send failure', {
+        mailboxId: mailbox.id,
+        processedMessageId,
+      });
+    }
     return {
       ok: false,
       status: 'FAILED_TELEGRAM_SEND',
@@ -1162,8 +1488,27 @@ async function processActiveMailboxJob(
   }
 
   // Step 11: bookkeeping. Failures here MUST NOT undo Telegram delivery.
+  // TASK-090 — the SENT write is fenced on our delivery-owner token. `false`
+  // means ownership was taken over while our send was in flight (we were
+  // presumed dead): we never overwrite the newer owner's state and we never
+  // repeat the external side effect — the remote delivery already happened,
+  // which is exactly the documented bounded-duplicate ambiguity window.
   try {
-    await markMessageAsSent(processedMessageId, deps.store, now());
+    const recorded = await markMessageAsSent(
+      processedMessageId,
+      deps.store,
+      now(),
+      deliveryOwnerToken,
+    );
+    if (!recorded) {
+      logger.warn(
+        'Telegram delivered but SENT bookkeeping lost delivery ownership',
+        {
+          mailboxId: mailbox.id,
+          processedMessageId,
+        },
+      );
+    }
   } catch {
     logger.warn('Failed to mark processed message as sent', {
       mailboxId: mailbox.id,

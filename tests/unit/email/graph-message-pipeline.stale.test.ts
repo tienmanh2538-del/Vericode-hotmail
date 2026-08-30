@@ -162,10 +162,14 @@ describe('graph message pipeline — stale relay protection (TASK-080)', () => {
     expect(h.sendMock).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves duplicate precedence: a known duplicate is reported as duplicate, not stale', async () => {
+  it('preserves duplicate precedence: a TERMINAL duplicate is reported as duplicate, not stale', async () => {
     const h = makeHarness(makeGraphMessage({ receivedDateTime: minutesAgoIso(5) }));
-    // Seed the store so the early dedup (which runs BEFORE the stale guard) fires.
-    await h.store.create({
+    // Seed a row that already reached a TERMINAL outcome (SENT) so the early
+    // dedup (which runs BEFORE the stale guard) fires. TASK-090 made the early
+    // dedup status-aware: only terminal rows (SENT/FAILED) short-circuit as
+    // duplicates — an unfinished DETECTED row now flows to delivery recovery
+    // instead (covered by the TASK-090 delivery-recovery test file).
+    const seeded = await h.store.create({
       mailboxId: MAILBOX_ID,
       graphMessageId: GRAPH_MESSAGE_ID,
       internetMessageId: null,
@@ -175,6 +179,7 @@ describe('graph message pipeline — stale relay protection (TASK-080)', () => {
       senderEmail: null,
       subjectHash: null,
     });
+    await h.store.markSent(seeded.id, NOW);
 
     const result = await processGraphMessageJob(makeJob(), h.deps);
     expect(result.status).toBe('SKIPPED_DUPLICATE');

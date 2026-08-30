@@ -1,4 +1,12 @@
+import { randomUUID } from 'node:crypto';
+
 import { hashSensitiveValue } from '@/lib/security/redact';
+
+import {
+  DELIVERY_LEASE_MS,
+  DELIVERY_OWNERSHIP_POLL_MS,
+  MAX_DELIVERY_ATTEMPTS,
+} from './delivery-ownership-policy';
 
 // TASK-068A — raised by a `ProcessedMessageStore.create` when the underlying
 // store rejects the insert because a row for the SAME (mailboxId, graphMessageId)
@@ -40,6 +48,10 @@ export type DeduplicationResult = {
   reason: DeduplicationReason;
   processedMessageId?: string;
   dedupeKey?: string;
+  // TASK-090 — when a fresh identity claim succeeds, the winner also holds the
+  // initial delivery-ownership lease under this opaque token. All completion
+  // writes (markSent / markFailed) must be fenced on it.
+  deliveryOwnerToken?: string;
 };
 
 export type ProcessedMessageStatus =
@@ -61,6 +73,11 @@ export type ProcessedMessageRecord = {
   subjectHash: string | null;
   status: ProcessedMessageStatus;
   sentToTelegramAt: Date | null;
+  // TASK-090 — delivery-ownership state (see prisma/schema.prisma).
+  deliveryAttempts: number;
+  deliveryLeaseUntil: Date | null;
+  deliveryOwner: string | null;
+  deliveryFailureReason: string | null;
   createdAt: Date;
 };
 
@@ -73,9 +90,40 @@ export type CreateProcessedMessageInput = {
   receivedAtBucket: string | null;
   senderEmail: string | null;
   subjectHash: string | null;
+  // TASK-090 — optional initial delivery ownership, written atomically with the
+  // identity-claim INSERT so the claim winner is also the first delivery owner.
+  // Omitted (legacy/mock callers) ⇒ attempts 0, no lease, no owner.
+  deliveryOwner?: string | null;
+  deliveryLeaseUntil?: Date | null;
+  deliveryAttempts?: number;
+};
+
+// TASK-090 — atomic delivery-ownership claim input. The store MUST apply this
+// as ONE conditional write (CAS): claim succeeds only when the row is still
+// DETECTED, the current lease is absent/expired at `now`, and the attempt
+// budget is not exhausted. On success the store sets owner + lease and
+// increments `deliveryAttempts` in the same write.
+export type ClaimDeliveryInput = {
+  processedMessageId: string;
+  ownerToken: string;
+  now: Date;
+  leaseUntil: Date;
+  maxAttempts: number;
+};
+
+// TASK-090 — conditional terminal-FAILED write for a row nobody currently
+// owns (lease absent/expired at `now`). Used to terminalize exhausted or stale
+// rows without stealing a live owner's state. `minAttempts` (when set) guards
+// the budget-exhausted transition.
+export type MarkFailedIfUnclaimedInput = {
+  processedMessageId: string;
+  reason: string;
+  now: Date;
+  minAttempts?: number;
 };
 
 export interface ProcessedMessageStore {
+  findById(processedMessageId: string): Promise<ProcessedMessageRecord | null>;
   findByGraphMessageId(
     mailboxId: string,
     graphMessageId: string,
@@ -90,7 +138,42 @@ export interface ProcessedMessageStore {
     receivedAtBucket: string,
   ): Promise<ProcessedMessageRecord | null>;
   create(input: CreateProcessedMessageInput): Promise<ProcessedMessageRecord>;
-  markSent(processedMessageId: string, sentAt: Date): Promise<void>;
+  /**
+   * TASK-090 — mark the row SENT. When `ownerToken` is provided the write is
+   * conditional on the row still carrying that delivery-owner token (CAS
+   * fencing: a stale owner must never overwrite a newer owner's state).
+   * Returns true when a row was updated, false when ownership was lost or the
+   * row is gone. Without a token (legacy mock flow, which has no concurrent
+   * delivery claimants) the write is unconditional by id.
+   */
+  markSent(
+    processedMessageId: string,
+    sentAt: Date,
+    ownerToken?: string,
+  ): Promise<boolean>;
+  /** TASK-090 — atomic delivery-ownership CAS claim. True ⇔ claim won. */
+  claimDelivery(input: ClaimDeliveryInput): Promise<boolean>;
+  /**
+   * TASK-090 — release the lease after a KNOWN-failed (retryable) attempt so
+   * the next BullMQ attempt can reclaim immediately instead of waiting out the
+   * lease. Conditional on owner token + status DETECTED; attempts are kept.
+   */
+  releaseDelivery(
+    processedMessageId: string,
+    ownerToken: string,
+  ): Promise<boolean>;
+  /**
+   * TASK-090 — terminal FAILED written by the CURRENT owner (permanent
+   * Telegram failure, or stale detected after ownership was acquired).
+   * Conditional on owner token + status DETECTED.
+   */
+  markFailedByOwner(
+    processedMessageId: string,
+    ownerToken: string,
+    reason: string,
+  ): Promise<boolean>;
+  /** TASK-090 — see MarkFailedIfUnclaimedInput. */
+  markFailedIfUnclaimed(input: MarkFailedIfUnclaimedInput): Promise<boolean>;
 }
 
 export const DEFAULT_BUCKET_MINUTES = 5;
@@ -301,9 +384,20 @@ export async function checkProcessedMessageDuplicate(
   };
 }
 
+// TASK-090 — options for the identity claim. The claim winner now also takes
+// the INITIAL delivery-ownership lease atomically with the INSERT, so there is
+// never a DETECTED row that is "unowned but mid-flight" between claim and send.
+export type ClaimMessageOptions = {
+  now?: () => Date;
+  leaseMs?: number;
+  /** Injectable for deterministic tests; defaults to a random UUID. */
+  ownerToken?: string;
+};
+
 export async function claimMessageForProcessing(
   input: DeduplicationInput,
   store: ProcessedMessageStore,
+  options: ClaimMessageOptions = {},
 ): Promise<DeduplicationResult> {
   const validated = validateInput(input);
   if (!validated) return invalidInputResult();
@@ -334,6 +428,13 @@ export async function claimMessageForProcessing(
 
   if (!effectiveGraphMessageId) return invalidInputResult();
 
+  // TASK-090 — the identity-claim INSERT doubles as the FIRST delivery-
+  // ownership claim: owner token + lease + attempts=1 are written atomically
+  // with the row, so the winner may proceed straight to the send path.
+  const now = options.now ?? (() => new Date());
+  const leaseMs = options.leaseMs ?? DELIVERY_LEASE_MS;
+  const ownerToken = options.ownerToken ?? randomUUID();
+
   let record: ProcessedMessageRecord;
   try {
     record = await store.create({
@@ -345,6 +446,9 @@ export async function claimMessageForProcessing(
       receivedAtBucket,
       senderEmail,
       subjectHash,
+      deliveryOwner: ownerToken,
+      deliveryLeaseUntil: new Date(now().getTime() + leaseMs),
+      deliveryAttempts: 1,
     });
   } catch (err) {
     // TASK-068A — exactly-once backstop. The duplicate check above passed, but a
@@ -378,18 +482,169 @@ export async function claimMessageForProcessing(
     reason: 'NEW_MESSAGE',
     processedMessageId: record.id,
     dedupeKey: buildProcessedMessageDedupeKey(input),
+    deliveryOwnerToken: ownerToken,
   };
 }
 
+/**
+ * TASK-090 — mark SENT, fenced on the delivery-owner token when supplied.
+ * Returns false when the write matched no row (ownership lost to a newer
+ * claimant, or row missing) — the caller must NOT retry the external side
+ * effect in that case.
+ */
 export async function markMessageAsSent(
   processedMessageId: string,
   store: ProcessedMessageStore,
   sentAt?: Date,
-): Promise<void> {
+  ownerToken?: string,
+): Promise<boolean> {
   if (!isNonEmptyString(processedMessageId)) {
     throw new Error('processedMessageId is required');
   }
-  await store.markSent(processedMessageId.trim(), sentAt ?? new Date());
+  return store.markSent(
+    processedMessageId.trim(),
+    sentAt ?? new Date(),
+    ownerToken,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TASK-090 — delivery-ownership acquisition for an EXISTING row
+// ---------------------------------------------------------------------------
+
+/**
+ * A row is delivery-recoverable when its identity was claimed but delivery
+ * never reached a terminal outcome. SENT and FAILED are terminal; every other
+ * status (today only DETECTED is ever written) is recoverable.
+ */
+export function isDeliveryRecoverableRow(
+  record: Pick<ProcessedMessageRecord, 'status'>,
+): boolean {
+  return record.status !== 'SENT' && record.status !== 'FAILED';
+}
+
+export type DeliveryOwnershipAcquisition =
+  | { kind: 'claimed'; ownerToken: string }
+  /** Row reached terminal SENT (another owner delivered it). */
+  | { kind: 'already_sent' }
+  /** Row reached terminal FAILED. */
+  | { kind: 'terminal_failed' }
+  /** Attempt budget exhausted; the row was terminally marked FAILED. */
+  | { kind: 'budget_exhausted' }
+  /**
+   * A live claimant currently owns delivery (its lease stayed active for the
+   * whole bounded wait, or it won the CAS race just now). That claimant's own
+   * job — including its BullMQ stalled-retry after a crash — is the recovery
+   * driver, so the caller skips terminally and safely.
+   */
+  | { kind: 'owned_elsewhere' };
+
+export type AcquireDeliveryOwnershipOptions = {
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  leaseMs?: number;
+  maxAttempts?: number;
+  pollMs?: number;
+  /** Injectable for deterministic tests; defaults to a random UUID. */
+  ownerToken?: string;
+};
+
+function defaultOwnershipSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * TASK-090 — acquire delivery ownership of an existing ProcessedMessage row.
+ *
+ * Correctness lives in `store.claimDelivery`, a single atomic conditional
+ * write: at most one claimant can hold a valid lease at a time according to DB
+ * state. This helper only decides WHEN to attempt that CAS:
+ *
+ *   - lease absent/expired + budget left  → CAS now; winner proceeds to send.
+ *   - budget exhausted                    → conditional terminal FAILED
+ *                                           (`delivery_attempts_exhausted`).
+ *   - lease active (owner possibly dead)  → bounded poll-wait until the lease
+ *     expires or the owner finishes. This wait is what makes a crashed owner's
+ *     row recoverable by the crashed job's OWN BullMQ re-attempt (S2): with
+ *     `attempts: 3` the retry chain is far shorter than the lease, so without
+ *     waiting in place the re-attempt would exhaust before it could reclaim.
+ *
+ * Strictly bounded: total sleep ≤ lease + one poll tick, CAS tries ≤ 2, and a
+ * defensive iteration cap guards against a non-advancing injected clock. The
+ * loop performs NO external side effect — Telegram is only ever called by a
+ * caller holding a freshly won token.
+ */
+export async function acquireDeliveryOwnership(
+  processedMessageId: string,
+  store: ProcessedMessageStore,
+  options: AcquireDeliveryOwnershipOptions = {},
+): Promise<DeliveryOwnershipAcquisition> {
+  const now = options.now ?? (() => new Date());
+  const sleep = options.sleep ?? defaultOwnershipSleep;
+  const leaseMs = options.leaseMs ?? DELIVERY_LEASE_MS;
+  const maxAttempts = options.maxAttempts ?? MAX_DELIVERY_ATTEMPTS;
+  const pollMs = Math.max(1, options.pollMs ?? DELIVERY_OWNERSHIP_POLL_MS);
+  const ownerToken = options.ownerToken ?? randomUUID();
+
+  const startMs = now().getTime();
+  const deadlineMs = startMs + leaseMs + pollMs;
+  // Defensive hard cap so a non-advancing test clock can never loop forever.
+  const maxIterations = Math.ceil((leaseMs + pollMs) / pollMs) + 8;
+
+  let casTries = 0;
+
+  for (let iteration = 0; iteration < maxIterations; iteration += 1) {
+    const row = await store.findById(processedMessageId);
+    if (!row) {
+      // No delete path exists for ProcessedMessage; treat a vanished row as
+      // externally handled rather than inventing a recovery.
+      return { kind: 'owned_elsewhere' };
+    }
+    if (row.status === 'SENT') return { kind: 'already_sent' };
+    if (row.status === 'FAILED') return { kind: 'terminal_failed' };
+
+    const nowMs = now().getTime();
+    const leaseActive =
+      row.deliveryLeaseUntil !== null &&
+      row.deliveryLeaseUntil.getTime() > nowMs;
+
+    if (!leaseActive) {
+      if (row.deliveryAttempts >= maxAttempts) {
+        await store.markFailedIfUnclaimed({
+          processedMessageId,
+          reason: 'delivery_attempts_exhausted',
+          now: now(),
+          minAttempts: maxAttempts,
+        });
+        return { kind: 'budget_exhausted' };
+      }
+      casTries += 1;
+      const claimed = await store.claimDelivery({
+        processedMessageId,
+        ownerToken,
+        now: now(),
+        leaseUntil: new Date(nowMs + leaseMs),
+        maxAttempts,
+      });
+      if (claimed) return { kind: 'claimed', ownerToken };
+      if (casTries >= 2) {
+        // Lost the CAS twice to claimants that are alive RIGHT NOW — their
+        // jobs drive delivery (or their stalled re-runs will). Skip safely.
+        return { kind: 'owned_elsewhere' };
+      }
+      continue; // Re-read to observe what the winner did.
+    }
+
+    if (nowMs >= deadlineMs) return { kind: 'owned_elsewhere' };
+    const waitMs = Math.min(
+      pollMs,
+      Math.max(1, row.deliveryLeaseUntil!.getTime() - nowMs),
+      Math.max(1, deadlineMs - nowMs),
+    );
+    await sleep(waitMs);
+  }
+
+  return { kind: 'owned_elsewhere' };
 }
 
 export function createInMemoryProcessedMessageStore(): ProcessedMessageStore {
@@ -397,6 +652,9 @@ export function createInMemoryProcessedMessageStore(): ProcessedMessageStore {
   let counter = 0;
 
   return {
+    async findById(processedMessageId) {
+      return records.find((r) => r.id === processedMessageId) ?? null;
+    },
     async findByGraphMessageId(mailboxId, graphMessageId) {
       return (
         records.find(
@@ -448,17 +706,95 @@ export function createInMemoryProcessedMessageStore(): ProcessedMessageStore {
         subjectHash: input.subjectHash,
         status: 'DETECTED',
         sentToTelegramAt: null,
+        deliveryAttempts: input.deliveryAttempts ?? 0,
+        deliveryLeaseUntil: input.deliveryLeaseUntil ?? null,
+        deliveryOwner: input.deliveryOwner ?? null,
+        deliveryFailureReason: null,
         createdAt: new Date(),
       };
       records.push(record);
       return record;
     },
-    async markSent(processedMessageId, sentAt) {
+    async markSent(processedMessageId, sentAt, ownerToken) {
       const target = records.find((r) => r.id === processedMessageId);
-      if (target) {
-        target.status = 'SENT';
-        target.sentToTelegramAt = sentAt;
+      if (!target) return false;
+      // TASK-090 — with a token, mirror the Prisma store's fenced conditional
+      // write: only the CURRENT owner of a still-DETECTED row may complete.
+      if (ownerToken !== undefined) {
+        if (target.status !== 'DETECTED' || target.deliveryOwner !== ownerToken) {
+          return false;
+        }
       }
+      target.status = 'SENT';
+      target.sentToTelegramAt = sentAt;
+      target.deliveryLeaseUntil = null;
+      return true;
+    },
+    async claimDelivery(input) {
+      // Mirror the Prisma store's single conditional UPDATE (CAS). JS is
+      // single-threaded per tick, so the check+mutate below is atomic exactly
+      // like a row-level UPDATE ... WHERE in Postgres.
+      const target = records.find((r) => r.id === input.processedMessageId);
+      if (!target) return false;
+      const leaseFree =
+        target.deliveryLeaseUntil === null ||
+        target.deliveryLeaseUntil.getTime() <= input.now.getTime();
+      if (
+        target.status !== 'DETECTED' ||
+        !leaseFree ||
+        target.deliveryAttempts >= input.maxAttempts
+      ) {
+        return false;
+      }
+      target.deliveryOwner = input.ownerToken;
+      target.deliveryLeaseUntil = input.leaseUntil;
+      target.deliveryAttempts += 1;
+      return true;
+    },
+    async releaseDelivery(processedMessageId, ownerToken) {
+      const target = records.find((r) => r.id === processedMessageId);
+      if (
+        !target ||
+        target.status !== 'DETECTED' ||
+        target.deliveryOwner !== ownerToken
+      ) {
+        return false;
+      }
+      target.deliveryLeaseUntil = null;
+      target.deliveryOwner = null;
+      return true;
+    },
+    async markFailedByOwner(processedMessageId, ownerToken, reason) {
+      const target = records.find((r) => r.id === processedMessageId);
+      if (
+        !target ||
+        target.status !== 'DETECTED' ||
+        target.deliveryOwner !== ownerToken
+      ) {
+        return false;
+      }
+      target.status = 'FAILED';
+      target.deliveryFailureReason = reason;
+      target.deliveryLeaseUntil = null;
+      return true;
+    },
+    async markFailedIfUnclaimed(input) {
+      const target = records.find((r) => r.id === input.processedMessageId);
+      if (!target || target.status !== 'DETECTED') return false;
+      const leaseFree =
+        target.deliveryLeaseUntil === null ||
+        target.deliveryLeaseUntil.getTime() <= input.now.getTime();
+      if (!leaseFree) return false;
+      if (
+        input.minAttempts !== undefined &&
+        target.deliveryAttempts < input.minAttempts
+      ) {
+        return false;
+      }
+      target.status = 'FAILED';
+      target.deliveryFailureReason = input.reason;
+      target.deliveryLeaseUntil = null;
+      return true;
     },
   };
 }

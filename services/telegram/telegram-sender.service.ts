@@ -1,9 +1,36 @@
 import { requireTelegramEnv } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
+import {
+  fetchWithTimeout,
+  HttpTimeoutError,
+} from '@/lib/http/fetch-with-timeout';
 
 const logger = createLogger();
 
 export const TELEGRAM_TEXT_MAX = 4096;
+
+// TASK-090 correction — explicit finite ceiling on ONE Telegram HTTP attempt,
+// enforced with a REAL AbortController cancellation (TASK-080 helper), never
+// the runtime's implicit socket behaviour. A timeout maps to the `network`
+// error kind, i.e. RETRYABLE — never permanent, never an auth signal.
+//
+// The value is derived from the TASK-090 delivery-lease budget, not picked
+// arbitrarily. Worst-case duration of one delivery ownership (one worker
+// attempt holding the lease) with this ceiling:
+//
+//   HTTP:      4 attempts × 15s                          =  60s
+//              (1 + DEFAULT_TELEGRAM_RETRY_DELAYS_MS.length, TASK-033)
+//   backoff:   3 waits × DEFAULT_MAX_RETRY_AFTER_MS(60s) = 180s  (429 worst)
+//   pacing:    destination throttle cap 15s + global pacer cap 2s = 17s
+//   overhead:  DB CAS/lookup writes — millisecond-scale
+//   ------------------------------------------------------------------
+//   total ≈ 257s  <  DELIVERY_LEASE_MS (300s), safety margin ≈ 43s (~14%)
+//
+// A deterministic test pins this inequality against the REAL constants
+// (tests/unit/telegram/telegram-sender.timeout.test.ts), so changing any term
+// without re-proving the budget fails the suite. Deliberately NOT env-tunable —
+// this is a bounded safety constant, same policy as the TASK-080/090 windows.
+export const TELEGRAM_HTTP_TIMEOUT_MS = 15_000;
 
 export type TelegramParseMode = 'HTML' | 'MarkdownV2';
 
@@ -48,6 +75,20 @@ export class TelegramSendError extends Error {
    * stall the worker indefinitely.
    */
   readonly retryAfterSeconds?: number;
+  /**
+   * TASK-090 (DF-90-4) — final retryability verdict attached by the TASK-033
+   * retry adapter when it re-throws after its bounded internal attempts:
+   *   false     → permanent/non-retryable (e.g. 400/403/404, validation,
+   *               config) — callers must treat delivery as terminally failed
+   *               and must NOT schedule any further retry.
+   *   true      → transient (429/5xx/network) whose bounded internal retries
+   *               were exhausted — a queue-level re-attempt may still help.
+   *   undefined → not classified (error thrown below the retry adapter);
+   *               callers keep their previous conservative behaviour.
+   * The classification itself stays in telegram-error.ts — this field only
+   * carries the verdict across the throw boundary.
+   */
+  readonly retryable?: boolean;
 
   constructor(
     kind: TelegramErrorKind,
@@ -57,6 +98,7 @@ export class TelegramSendError extends Error {
       telegramDescription?: string;
       statusCode?: number;
       retryAfterSeconds?: number;
+      retryable?: boolean;
     },
   ) {
     super(message);
@@ -66,6 +108,7 @@ export class TelegramSendError extends Error {
     this.telegramDescription = options?.telegramDescription;
     this.statusCode = options?.statusCode;
     this.retryAfterSeconds = options?.retryAfterSeconds;
+    this.retryable = options?.retryable;
   }
 }
 
@@ -163,12 +206,31 @@ export async function sendTelegramMessage(
 
   let response: Response;
   try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch {
+    // TASK-090 correction — finite timeout + real cancellation: on expiry the
+    // AbortController tears the request down (the promise settles), so a hung
+    // Telegram call can never hold a delivery-lease owner past its budget.
+    response = await fetchWithTimeout(
+      fetch,
+      url,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      { timeoutMs: TELEGRAM_HTTP_TIMEOUT_MS },
+    );
+  } catch (error) {
+    if (error instanceof HttpTimeoutError) {
+      // Timeout is a transient outcome: classify as `network` (retryable per
+      // telegram-error.ts) — never permanent. NOTE: the request may still have
+      // reached Telegram before the abort, so this sits inside the documented
+      // ambiguous remote-side-effect window (bounded duplicate risk).
+      logger.warn('Telegram request timed out', {
+        chatId,
+        timeoutMs: TELEGRAM_HTTP_TIMEOUT_MS,
+      });
+      throw new TelegramSendError('network', 'Telegram request timed out');
+    }
     logger.error('Telegram network call failed', { chatId });
     throw new TelegramSendError('network', 'Telegram request failed');
   }

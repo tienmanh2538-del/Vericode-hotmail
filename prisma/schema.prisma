@@ -277,6 +277,35 @@ model ProcessedMessage {
   codeHash          String?
   status            ProcessedMessageStatus @default(DETECTED)
   sentToTelegramAt  DateTime?
+  // TASK-090 — explicit delivery state / cross-process delivery ownership.
+  //
+  // A row with status DETECTED is "identity claimed, delivery not finished".
+  // Delivery ownership is a short DB lease claimed via an atomic conditional
+  // update (CAS): a worker attempt may only send to Telegram while it holds the
+  // current `deliveryOwner` token and the lease has not been taken over.
+  //
+  //   deliveryAttempts      — number of delivery-ownership claims consumed for
+  //                           this row (bounded by MAX_DELIVERY_ATTEMPTS in
+  //                           services/email/delivery-ownership-policy.ts).
+  //   deliveryLeaseUntil    — lease expiry; NULL = not currently owned. A
+  //                           crashed owner's lease expires and the row becomes
+  //                           reclaimable (bounded stale reclaim).
+  //   deliveryOwner         — opaque random claim-generation token. markSent /
+  //                           markFailed are conditional on this token so a
+  //                           stale owner can never overwrite a newer owner.
+  //   deliveryFailureReason — sanitized category (e.g. "telegram_api_400",
+  //                           "delivery_attempts_exhausted") written when the
+  //                           row reaches terminal FAILED. Never carries a
+  //                           code, token, chat id, or message content.
+  //
+  // Historical rows (attempts 0 / NULL lease / NULL owner) are claimable, but
+  // the TASK-080 stale guard (30m, Graph receivedDateTime) terminally blocks
+  // any old message from being re-delivered, so the migration cannot cause a
+  // mass redelivery of old verification messages.
+  deliveryAttempts      Int       @default(0)
+  deliveryLeaseUntil    DateTime?
+  deliveryOwner         String?
+  deliveryFailureReason String?
   createdAt         DateTime               @default(now())
 
   @@unique([mailboxId, graphMessageId])

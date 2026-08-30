@@ -256,8 +256,15 @@ export function createRetryingTelegramSendPort(
         // Alerting must never mask or replace the original delivery failure.
       }
 
+      // TASK-090 (DF-90-4) — carry the retryability verdict across the throw
+      // boundary so the pipeline can mark a permanent failure terminally
+      // (FAILED) instead of burning a pointless BullMQ re-attempt, while an
+      // exhausted-but-transient failure stays eligible for queue-level
+      // recovery. `outcome.retryable` comes from telegram-error.ts unchanged
+      // (429/5xx/network → true; other 4xx/validation/config → false).
       throw new TelegramSendError('telegram_api', 'Telegram send failed', {
         statusCode: outcome.statusCode,
+        retryable: outcome.retryable,
       });
     },
   };

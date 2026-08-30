@@ -205,6 +205,13 @@ export async function processEmailWebhookJob(
   // TASK-055: DEFERRED_MAILBOX_BUSY is also retryable — another job for the same
   // mailbox holds the per-mailbox lock, so this job throws to be re-attempted
   // later with backoff (bounded by the job's `attempts`, never an infinite loop).
+  //
+  // TASK-090: FAILED_TELEGRAM_PERMANENT is deliberately NOT in this list — a
+  // permanent Telegram failure (non-retryable 4xx/validation/config) already
+  // marked the ProcessedMessage terminally FAILED, so throwing here would only
+  // burn a pointless BullMQ attempt. FAILED_TELEGRAM_SEND (retryable,
+  // internal retries exhausted) still throws: with the TASK-090 delivery-state
+  // recovery the re-attempt can actually reach the send path again.
   if (
     result.status === 'FAILED_GRAPH_FETCH' ||
     result.status === 'FAILED_RECONNECT_REQUIRED' ||

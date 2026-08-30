@@ -20,6 +20,26 @@ const MAILBOX_A = 'mailbox_test_alpha';
 const GRAPH_MESSAGE_ID = 'graph-msg-test-068a';
 const CODE = '424242';
 
+// TASK-090 — the store contract gained delivery-ownership methods; the two
+// hand-rigged stores below never exercise them, so share inert stubs.
+const unusedDeliveryOwnershipStubs = {
+  async findById(): Promise<ProcessedMessageRecord | null> {
+    return null;
+  },
+  async claimDelivery(): Promise<boolean> {
+    return false;
+  },
+  async releaseDelivery(): Promise<boolean> {
+    return false;
+  },
+  async markFailedByOwner(): Promise<boolean> {
+    return false;
+  },
+  async markFailedIfUnclaimed(): Promise<boolean> {
+    return false;
+  },
+};
+
 function baseInput(overrides: Partial<DeduplicationInput> = {}): DeduplicationInput {
   return {
     mailboxId: MAILBOX_A,
@@ -74,6 +94,10 @@ describe('claimMessageForProcessing — exactly-once under concurrency', () => {
       subjectHash: null,
       status: 'DETECTED',
       sentToTelegramAt: null,
+      deliveryAttempts: 1,
+      deliveryLeaseUntil: null,
+      deliveryOwner: 'owner-existing',
+      deliveryFailureReason: null,
       createdAt: new Date('2026-06-04T10:00:31.000Z'),
     };
 
@@ -98,8 +122,9 @@ describe('claimMessageForProcessing — exactly-once under concurrency', () => {
         throw new ProcessedMessageDuplicateError();
       },
       async markSent() {
-        /* unused */
+        return false; /* unused */
       },
+      ...unusedDeliveryOwnershipStubs,
     };
 
     const result = await claimMessageForProcessing(baseInput(), store);
@@ -128,8 +153,9 @@ describe('claimMessageForProcessing — exactly-once under concurrency', () => {
         throw new Error('database unreachable');
       },
       async markSent() {
-        /* unused */
+        return false; /* unused */
       },
+      ...unusedDeliveryOwnershipStubs,
     };
 
     await expect(claimMessageForProcessing(baseInput(), store)).rejects.toThrow(
@@ -165,7 +191,7 @@ describe('createPrismaProcessedMessageStore — P2002 mapping', () => {
         findUnique: async () => null,
         findFirst: async () => null,
         create: createImpl,
-        update: async () => undefined,
+        updateMany: async () => ({ count: 0 }),
       },
     } as never;
   }
