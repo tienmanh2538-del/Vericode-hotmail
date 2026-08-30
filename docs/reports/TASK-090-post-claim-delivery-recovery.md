@@ -1,13 +1,24 @@
 # TASK-090 — Post-Claim Telegram Delivery Failure Recovery & Delivery State Safety (Report)
 
-> **PHASE 2 — IMPLEMENTED, CHỜ ANTIGRAVITY IMPLEMENTATION REVIEW.**
+> **TASK-090 COMPLETED — STAGING ROLLOUT & RUNTIME VALIDATION PASS.**
+>
+> Quality gates đầy đủ: Architecture Review PASS → Final Implementation Review PASS →
+> Timeout Correction Re-review PASS → ROADMAP Close-out Review PASS → feature CI PASS
+> → migration preflight read-only PASS → controlled ff-promotion vào dedicated branch
+> `staging` → staging CI PASS → migration apply staging thành công → post-deploy
+> schema verification PASS → **PASS — TASK-090 STAGING RUNTIME VALIDATION APPROVED**
+> (tóm tắt: mục **Q**; chi tiết: task file **§20.17**).
+>
+> Reviewed/promoted runtime SHA: **`707ca03d10879d170fa556fc18444665fdebd52b`**.
+> Final documentation sync này là docs-only, xảy ra SAU runtime validation, không
+> deploy staging và không cần promotion (TASK-088); Railway source vẫn là dedicated
+> branch `staging`.
 >
 > Antigravity Architecture Review: **PASS — TASK-090 ARCHITECTURE APPROVED FOR PHASE 2
 > IMPLEMENTATION** (kiến trúc khóa: **OPTION A — claim-before-send + explicit delivery
-> state + status-aware dedup**). Phase 2 đã implement xong: implementation record đầy
-> đủ ở task file **§20**; tóm tắt ở mục **P** dưới đây. `npm run verify` **PASS** —
-> 108 test files / 1339 tests. Chưa commit/push; chưa update ROADMAP; **không migration
-> nào được chạy trên staging/production**; không thao tác Railway.
+> state + status-aware dedup**). Implementation record đầy đủ ở task file **§20**;
+> tóm tắt ở mục **P** dưới đây. `npm run verify` **PASS** — 109 test files / 1344
+> tests (sau timeout correction).
 >
 > Mục A–O bên dưới là Phase 1 findings (mô tả HEAD TRƯỚC khi implement — giữ nguyên
 > làm evidence). Hành vi hiện hành sau Phase 2: mục **P** + task file §20.
@@ -291,6 +302,27 @@ không đổi. Ambiguous remote-success window vẫn tồn tại (request có th
 Telegram trước abort) — vẫn không claim exactly-once Telegram. Chi tiết: task file
 §20.16.
 
+## Q. STAGING ROLLOUT & RUNTIME VALIDATION (final — chi tiết: task file §20.17)
+
+Runtime SHA validated: **`707ca03d10879d170fa556fc18444665fdebd52b`** (= reviewed
+commit, staging HEAD sau ff-promotion). Migration TASK-090 apply staging **thành
+công** (Pre-Deploy web), post-deploy schema verification PASS (4 cột đúng shape).
+Runtime evidence (Human-observed): 4 Railway services Active; Email worker PASS;
+Delta polling PASS; Queue/Redis PASS (backlog = 0); Telegram reliability PASS
+(failures 24h = 0); **không observed mass historical replay; không observed
+regression attributable to TASK-090**. Antigravity verdict: **PASS — TASK-090
+STAGING RUNTIME VALIDATION APPROVED**.
+
+Observation độc lập (TASK-090 không sửa, không được gán cho TASK-090): queue
+FAILED retained count = historical BullMQ retention (7 ngày/5000 jobs, 60m failed
+= 0, khác ProcessedMessage FAILED); Graph 403 ErrorQuotaExceeded =
+existing/independent (TASK-071/075); Subscription renewal UNKNOWN + Webhook
+UNKNOWN = existing observability behavior. Live recovery/timeout path không được
+exercised bằng sự cố tự nhiên trong observation window — chỉ deterministic tests
+(ghi trung thực, không claim hơn).
+
 ---
 
-READY FOR ANTIGRAVITY TIMEOUT CORRECTION RE-REVIEW — NO COMMIT / NO PUSH
+TASK-090 COMPLETED — STAGING RUNTIME VALIDATION PASS. Final docs-only sync này
+chờ Antigravity Final Documentation Sync Review; không commit/push trong bước
+hiện tại.

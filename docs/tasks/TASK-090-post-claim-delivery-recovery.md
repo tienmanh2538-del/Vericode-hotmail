@@ -1,13 +1,27 @@
 # TASK-090 — Post-Claim Telegram Delivery Failure Recovery & Delivery State Safety
 
-> **TRẠNG THÁI: PHASE 2 — IMPLEMENTED, CHỜ ANTIGRAVITY IMPLEMENTATION REVIEW.**
+> **TRẠNG THÁI: TASK-090 COMPLETED — STAGING ROLLOUT & RUNTIME VALIDATION PASS.**
+>
+> Chuỗi quality gates đầy đủ: Antigravity Architecture Review PASS → Phase 2
+> implementation → Antigravity Final Implementation Review PASS → Timeout Correction →
+> Antigravity Timeout Correction Re-review PASS → ROADMAP close-out → Antigravity
+> ROADMAP Close-out Review PASS → feature GitHub Actions PASS → migration preflight
+> read-only PASS → controlled fast-forward promotion vào dedicated branch `staging` →
+> staging GitHub Actions PASS → migration TASK-090 apply staging thành công →
+> post-deploy schema verification PASS → **PASS — TASK-090 STAGING RUNTIME VALIDATION
+> APPROVED** (evidence: **§20.17**).
+>
+> Reviewed/promoted runtime SHA: **`707ca03d10879d170fa556fc18444665fdebd52b`** —
+> chính là commit đã qua mọi review gate. Final documentation sync này là docs-only
+> và xảy ra SAU runtime validation; nó KHÔNG được deploy staging và không cần
+> promotion (theo TASK-088, docs-only không bắt buộc promotion; Railway source vẫn là
+> dedicated branch `staging`).
 >
 > Antigravity Architecture Review: **PASS — TASK-090 ARCHITECTURE APPROVED FOR PHASE 2
 > IMPLEMENTATION**. Kiến trúc khóa: **OPTION A — CLAIM-BEFORE-SEND WITH EXPLICIT
 > DELIVERY STATE & STATUS-AWARE DEDUP**. Implementation record đầy đủ ở **§20** (state
 > machine, schema, CAS/lease semantics, taxonomy, retry budget, tests). `npm run verify`
-> PASS — 108 test files / 1339 tests. Chưa commit/push; chưa update ROADMAP; không
-> migration nào được chạy trên staging/production; không thao tác Railway.
+> PASS — 109 test files / 1344 tests (sau timeout correction).
 >
 > §1–§19 dưới đây là Phase 1 investigation (giữ nguyên làm evidence nền — mô tả HEAD
 > TRƯỚC khi implement). Chỗ nào §20 mô tả hành vi mới thì §20 là hiện hành.
@@ -858,3 +872,46 @@ timeout/cancellation tường minh (chỉ dựa vào hành vi runtime ngầm) tr
 * Ambiguous remote-success window (§20.9) vẫn tồn tại: request có thể đã tới
   Telegram trước khi bị abort/mất ack — timeout không tạo và không xóa cửa sổ này;
   vẫn KHÔNG claim exactly-once Telegram.
+
+### §20.17 Staging rollout & runtime validation record (final)
+
+Trình tự đã thực hiện (mọi bước runtime tại SHA
+`707ca03d10879d170fa556fc18444665fdebd52b`):
+
+1. Feature GitHub Actions PASS trên commit reviewed.
+2. Migration preflight read-only PASS trên PostgreSQL staging (không migration
+   failed/dở dang; migration TASK-090 chưa apply; bảng ProcessedMessage tồn tại;
+   4 cột TASK-090 chưa tồn tại — không schema drift; CASE 2 theo TASK-088, không
+   cần data remediation).
+3. Controlled fast-forward promotion vào dedicated branch `staging` PASS (staging
+   HEAD = reviewed SHA; Railway source không đổi; TASK-088 model giữ nguyên).
+4. Staging GitHub Actions PASS.
+5. Migration `20260901000000_task090_processed_message_delivery_state` apply
+   staging **thành công** qua Pre-Deploy của service web (sole migration executor).
+6. Post-deploy database verification PASS (Human-observed read-only queries):
+   migration record hoàn tất trong `_prisma_migrations`, 4 cột đúng shape đã
+   review (`deliveryAttempts` integer NOT NULL default 0; ba cột còn lại nullable).
+7. **Antigravity Staging Runtime Validation: PASS — TASK-090 STAGING RUNTIME
+   VALIDATION APPROVED.** Evidence chính (Human-observed + repo trace):
+   4 Railway services Active; Email worker pipeline PASS (traffic thật chạy qua
+   pipeline mới, 60m jobs failed = 0); Delta polling PASS; Queue/Redis PASS
+   (backlog = 0, waiting/active/delayed = 0); Telegram send reliability PASS
+   (failures 24h = 0); **không observed mass historical replay** (không backlog
+   burst / send spike — khớp thiết kế: historical DETECTED rows bị stale guard
+   chặn); **không observed regression attributable to TASK-090**.
+
+Các observation độc lập được phân loại trong validation (TASK-090 KHÔNG sửa các
+mục này — không được hiểu là đã fix):
+
+* Queue FAILED retained count (174 tại thời điểm quan sát) là **historical BullMQ
+  retention** (removeOnFail 7 ngày / 5000 jobs), recent failed jobs 60m = 0 —
+  khác hoàn toàn ProcessedMessage FAILED; không retry, không ảnh hưởng runtime.
+* Graph HTTP 403 ErrorQuotaExceeded: **existing/independent observation**
+  (TASK-071/075 path, đã ghi nhận từ TASK-089).
+* Subscription renewal UNKNOWN và Webhook health UNKNOWN: **existing
+  observability behavior** có từ trước TASK-090.
+
+Giới hạn ghi trung thực: trong observation window không có Telegram failure/crash
+tự nhiên nào, nên live recovery path (S1/S2) và live timeout path chỉ được chứng
+minh bằng deterministic tests (đã PASS trong CI), không phải bằng sự cố thật trên
+staging.
