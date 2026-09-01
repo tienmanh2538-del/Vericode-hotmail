@@ -624,7 +624,78 @@ worker tests (#10/#20 options-level).
   full run 110 test files / 1350 tests PASS; lint/typecheck/build PASS.
 - Không migration; không env/Redis/BullMQ/Railway change; behavioral change chỉ
   ở worker-email.
-- Chưa commit/push; chưa promotion staging (Railway staging vẫn dùng branch
-  `staging`); ROADMAP chưa cập nhật vì staging validation chưa hoàn tất.
-- **Trạng thái: Antigravity Implementation Review PASS; sẵn sàng Final
-  Pre-Commit Review.**
+- Các bước sau Implementation Review (Final Pre-Commit Review, push/CI,
+  promotion, runtime validation) và trạng thái close-out: xem §17.
+
+---
+
+## §17. Close-out — quality gates, staging runtime validation, completion status
+
+### §17.1. Quality gates (tất cả PASS)
+
+1. Phase 1 Architecture Review — PASS.
+2. Phase 2 Implementation Review — PASS.
+3. Final Pre-Commit Review — PASS.
+4. Feature push thành công.
+5. Feature CI — PASS.
+6. Controlled fast-forward promotion sang staging — PASS.
+7. Staging CI — PASS.
+8. Staging Runtime Validation — **PASS — TASK-092 STAGING RUNTIME VALIDATION
+   APPROVED** (không finding Critical/High/Medium).
+
+### §17.2. Implementation đã chốt (recap)
+
+worker-email dùng timeout 20.000 ms cho access-token refresh và cho Graph
+`getMessageById`; cancellation thật qua AbortController/`fetchWithTimeout`
+(không Promise.race); timeout classify network → transient/retryable; caller
+không truyền timeout giữ pass-through behavior; behavioral change chỉ ở
+worker-email; không migration/env/Redis/BullMQ change. Chi tiết: §16.
+
+### §17.3. Runtime staging evidence (phân loại nguồn)
+
+Nguồn evidence: (a) Git SHA do Antigravity kiểm tra trực tiếp từ repository;
+(b) Railway/GitHub/admin runtime evidence do operator cung cấp — Antigravity
+KHÔNG tuyên bố đã trực tiếp truy cập Railway.
+
+Ghi nhận:
+
+- Reviewed feature SHA trùng staging SHA (promotion là fast-forward).
+- Staging CI PASS.
+- Bốn service vẫn dùng branch staging; Auto Deploy và Wait for CI giữ nguyên.
+- Bốn service Active/Healthy; web Pre-Deploy thành công dưới dạng no-op
+  (CASE 1 — NO MIGRATION).
+- `/admin/health` không regression; worker-email ổn định; không crash
+  loop/unhandled rejection.
+- Không spike `FAILED_TOKEN_TRANSIENT` hoặc `FAILED_GRAPH_FETCH`; queue không
+  backlog bất thường, không mất capacity.
+
+### §17.4. Evidence limitations (trung thực)
+
+- Natural hanging Microsoft request: **NOT OBSERVED** trong cửa sổ quan sát.
+- Natural email job: **NOT OBSERVED** trong cửa sổ quan sát.
+- KHÔNG tuyên bố timeout 20 giây đã tự nhiên kích hoạt trên staging.
+- Cancellation/timeout behavior được xác minh bằng deterministic tests
+  (§16.3), không phải bằng traffic tự nhiên.
+- Absence of natural traffic không phải blocker cho runtime validation.
+
+### §17.5. Verification
+
+- Targeted: 5 test files / 51 tests PASS.
+- Full suite: 110 test files / 1350 tests PASS; lint/typecheck/build PASS.
+- Staging repository verification PASS.
+
+### §17.6. Residual findings (giữ nguyên, KHÔNG thuộc scope TASK-092)
+
+DF-92-1 (body read ngoài timeout window); DF-92-2 (caller-provided signal
+composition); DF-92-3/DF-92-5 (HTTP seams ngoài worker-email runtime path);
+DF-92-4 (Redis mailbox-lock wiring); DF-92-6 (mailbox-lock TTL ngắn hơn
+worst-case attempt); timeout observability vẫn gộp vào network.
+
+### §17.7. Completion status
+
+- Implementation: COMPLETE.
+- Review: COMPLETE.
+- Staging promotion: COMPLETE.
+- Runtime validation: COMPLETE.
+- Ready for documentation close-out commit.
+- **Chưa production rollout.**

@@ -387,8 +387,46 @@ Kết luận: **PASS — TASK-092 PHASE 2 IMPLEMENTATION APPROVED.**
 - Không migration; không env/Redis/BullMQ/Railway change; behavioral change chỉ
   ở worker-email.
 
-## 20. Trạng thái
+## 20. Staging Promotion & Runtime Validation
 
-Chưa commit/push; chưa promotion staging; ROADMAP chưa cập nhật vì staging
-validation chưa hoàn tất.
-**Antigravity Implementation Review PASS; sẵn sàng Final Pre-Commit Review.**
+Chuỗi gate sau Implementation Review (tất cả PASS): Final Pre-Commit Review →
+feature push → feature CI → **controlled fast-forward promotion** sang staging →
+staging CI → Staging Runtime Validation.
+
+Verdict runtime chính thức của Antigravity:
+
+**PASS — TASK-092 STAGING RUNTIME VALIDATION APPROVED**
+(không finding Critical, High hoặc Medium).
+
+Ghi nhận (tóm tắt có cấu trúc, không sao chép raw báo cáo/logs):
+
+- Reviewed feature SHA trùng staging SHA; promotion là fast-forward thuần.
+- Staging CI PASS.
+- **CASE 1 — NO MIGRATION**: web Pre-Deploy (`migrate deploy`) thành công dưới
+  dạng no-op.
+- Bốn Railway service vẫn dùng branch staging, Auto Deploy + Wait for CI giữ
+  nguyên; cả bốn Active/Healthy.
+- `/admin/health` không regression; worker-email runtime ổn định (không crash
+  loop, không unhandled rejection).
+- Queue capacity ổn định; không backlog bất thường; không error spike
+  (`FAILED_TOKEN_TRANSIENT` / `FAILED_GRAPH_FETCH` không tăng đột biến).
+
+Phân loại nguồn evidence: Git SHA do Antigravity kiểm tra từ repository;
+Railway/GitHub/admin runtime evidence do operator cung cấp — Antigravity không
+tuyên bố đã trực tiếp truy cập Railway.
+
+**Evidence limitations (trung thực):** natural hanging Microsoft request —
+NOT OBSERVED; natural email job — NOT OBSERVED trong cửa sổ quan sát. Không
+tuyên bố timeout 20 giây đã tự nhiên kích hoạt trên staging; deterministic
+timeout tests (mục 15) là evidence chính cho abort/timeout behavior. Absence
+of natural traffic không phải blocker cho runtime validation.
+
+**Residual findings giữ nguyên deferred:** DF-92-1; DF-92-2; DF-92-3/DF-92-5;
+DF-92-4; DF-92-6; timeout observability vẫn gộp vào network classification.
+
+## 21. Trạng thái close-out
+
+Implementation complete; review complete; staging promotion complete; runtime
+validation complete. TASK-092 sẵn sàng documentation close-out commit.
+**Chưa production rollout.** ROADMAP đã được cập nhật trong close-out này
+(entry TASK-092 completed end-to-end; task tiếp theo chưa chốt).
