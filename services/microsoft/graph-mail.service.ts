@@ -1,4 +1,5 @@
 import { createLogger } from '@/lib/logger';
+import { fetchWithTimeout } from '@/lib/http/fetch-with-timeout';
 
 const logger = createLogger();
 
@@ -88,6 +89,12 @@ export interface ListInboxMessagesOptions {
 export interface GetMessageOptions {
   preferTextBody?: boolean;
   fetchImpl?: typeof fetch;
+  // TASK-092 — optional finite timeout for the Graph request. The email worker
+  // passes this so a hung message fetch can never pin a worker slot forever.
+  // Omitted ⇒ unchanged pass-through behaviour (no AbortController) for every
+  // other caller. On timeout the request is truly aborted and surfaces as a
+  // `network` GraphMailError (transient/retryable — never auth/permission).
+  timeoutMs?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -239,13 +246,23 @@ async function performGraphRequest(
   preferTextBody: boolean,
   fetchImpl: typeof fetch,
   operationLabel: string,
+  timeoutMs?: number,
 ): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetchImpl(url, {
-      method: 'GET',
-      headers: buildHeaders(accessToken, preferTextBody),
-    });
+    // TASK-092 — when a finite `timeoutMs` is provided the request runs under
+    // `fetchWithTimeout` (AbortController; the signal reaches the native fetch
+    // and the socket is torn down on timeout). Without it the helper is a plain
+    // pass-through, so non-worker callers keep today's behaviour exactly.
+    response = await fetchWithTimeout(
+      fetchImpl,
+      url,
+      {
+        method: 'GET',
+        headers: buildHeaders(accessToken, preferTextBody),
+      },
+      { timeoutMs },
+    );
   } catch {
     // Token value is never logged — only the failure event.
     logger.error(`Microsoft Graph ${operationLabel} network call failed`);
@@ -334,6 +351,7 @@ export async function getMessageById(
     preferTextBody,
     fetchImpl,
     'getMessageById',
+    options.timeoutMs,
   );
 
   const message = normalizeMessage(payload);

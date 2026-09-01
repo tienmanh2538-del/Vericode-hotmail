@@ -3,16 +3,33 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const refreshMock = vi.fn();
 const decryptMock = vi.fn();
 const persistRotatedMock = vi.fn();
+const getMessageByIdMock = vi.fn();
 
 // TASK-069C — keep the REAL RefreshAccessTokenError so classification
 // (instanceof + microsoftErrorCode) works exactly like production.
+// TASK-092 — the mock forwards the options object so the tests can assert the
+// email worker wires the finite `timeoutMs` into the shared refresh service.
 vi.mock('@/services/microsoft/refresh-access-token.service', async () => {
   const actual = await vi.importActual<
     typeof import('@/services/microsoft/refresh-access-token.service')
   >('@/services/microsoft/refresh-access-token.service');
   return {
     ...actual,
-    refreshMicrosoftAccessToken: (token: string) => refreshMock(token),
+    refreshMicrosoftAccessToken: (token: string, options?: unknown) =>
+      refreshMock(token, options),
+  };
+});
+
+// TASK-092 — capture the Graph fetch options so the tests can assert the email
+// worker's Graph port passes the same finite `timeoutMs`.
+vi.mock('@/services/microsoft/graph-mail.service', async () => {
+  const actual = await vi.importActual<
+    typeof import('@/services/microsoft/graph-mail.service')
+  >('@/services/microsoft/graph-mail.service');
+  return {
+    ...actual,
+    getMessageById: (accessToken: string, messageId: string, options?: unknown) =>
+      getMessageByIdMock(accessToken, messageId, options),
   };
 });
 
@@ -36,6 +53,8 @@ import {
   createPrismaEmailAccessTokenPort,
   createPrismaMailboxLookupPort,
   EmailWorkerTokenError,
+  EMAIL_WORKER_HTTP_TIMEOUT_MS,
+  graphMessageFetchPort,
   isRedisConfiguredForPacer,
 } from '@/services/queue/workers/email-worker-runner';
 import type { RedisGlobalThrottleClient } from '@/services/queue/redis-global-send-throttle';
@@ -44,6 +63,7 @@ beforeEach(() => {
   refreshMock.mockReset();
   decryptMock.mockReset();
   persistRotatedMock.mockReset();
+  getMessageByIdMock.mockReset();
   persistRotatedMock.mockResolvedValue({ rotated: false });
 });
 
@@ -107,7 +127,10 @@ describe('createPrismaEmailAccessTokenPort — token rotation', () => {
 
     expect(token).toBe('AT');
     expect(decryptMock).toHaveBeenCalledWith('cipher');
-    expect(refreshMock).toHaveBeenCalledWith('plain-refresh');
+    // TASK-092 — the email worker opts into the finite refresh timeout.
+    expect(refreshMock).toHaveBeenCalledWith('plain-refresh', {
+      timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+    });
     // The worker uses the SAME rotation helper as delta-polling / renewal, now
     // passing the read generation (G0) as the CAS expected generation (TASK-085).
     expect(persistRotatedMock).toHaveBeenCalledWith('mb1', 'new-RT', 'cipher', {
@@ -237,6 +260,30 @@ describe('createPrismaEmailAccessTokenPort — failure classification (TASK-069C
     expect(error.classification).toBe('transient');
   });
 
+  it('TASK-092 — a refresh timeout stays transient AND never persists a rotated credential', async () => {
+    decryptMock.mockReturnValue('plain-refresh');
+    // `fetchWithTimeout` surfaces a timeout as a `network` RefreshAccessTokenError
+    // (see refresh-access-token.timeout.test.ts for the real abort behaviour).
+    refreshMock.mockRejectedValue(
+      new RefreshAccessTokenError('network', 'Microsoft token request failed'),
+    );
+    const port = createPrismaEmailAccessTokenPort(makeClient() as never);
+    const error = (await port
+      .getAccessTokenForMailbox({
+        id: 'mb1',
+        emailAddress: 'box@example.com',
+        status: 'ACTIVE',
+      })
+      .catch((e) => e)) as EmailWorkerTokenError;
+
+    expect(error).toBeInstanceOf(EmailWorkerTokenError);
+    // Never reconnect on a timeout — the mailbox must stay ACTIVE.
+    expect(error.classification).toBe('transient');
+    // TASK-085 safety: the timeout throws BEFORE the rotation persist, so no
+    // credential CAS write can happen on a timed-out exchange.
+    expect(persistRotatedMock).not.toHaveBeenCalled();
+  });
+
   it('marks a missing refresh token as reconnect_required', async () => {
     const client = {
       mailbox: {
@@ -255,6 +302,25 @@ describe('createPrismaEmailAccessTokenPort — failure classification (TASK-069C
     expect(error).toBeInstanceOf(EmailWorkerTokenError);
     expect(error.classification).toBe('reconnect_required');
     expect(refreshMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('email-worker HTTP timeout wiring (TASK-092)', () => {
+  it('pins the caller-side constant to the approved 20s ceiling', () => {
+    expect(EMAIL_WORKER_HTTP_TIMEOUT_MS).toBe(20_000);
+  });
+
+  it('graph fetch port passes the SAME finite timeout to getMessageById', async () => {
+    getMessageByIdMock.mockResolvedValue({ id: 'msg-1' });
+
+    await graphMessageFetchPort.fetchMessage('access-token-placeholder', 'msg-1');
+
+    expect(getMessageByIdMock).toHaveBeenCalledTimes(1);
+    expect(getMessageByIdMock).toHaveBeenCalledWith(
+      'access-token-placeholder',
+      'msg-1',
+      { timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS },
+    );
   });
 });
 

@@ -49,6 +49,14 @@ import type { EmailWorkerPipeline } from './email-worker';
 
 const MAILBOX_STATUS_RECONNECT_REQUIRED = 'RECONNECT_REQUIRED';
 
+// TASK-092 — finite ceiling for BOTH Microsoft HTTP seams on the email-worker
+// runtime path (access-token refresh + Graph getMessageById). Matches the 20s
+// the delta path has run in production since TASK-080 (same Microsoft
+// endpoints) and stays far below the 300s delivery lease. Caller-side on
+// purpose: the shared services keep their no-timeout default, so web/renewal
+// callers are unchanged. Deliberately NOT env-tunable (TASK-080/090 style).
+export const EMAIL_WORKER_HTTP_TIMEOUT_MS = 20_000;
+
 // TASK-055 — process-wide singletons shared across every job the worker runs, so
 // the per-mailbox lock map and the per-destination spacing map are shared state.
 // Building them here (not per job) is what makes the guards effective. Both are
@@ -252,7 +260,14 @@ export function createPrismaEmailAccessTokenPort(
       }
       let exchanged: { accessToken: string; refreshToken?: string };
       try {
-        exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken);
+        // TASK-092 — bound the token-endpoint request with a finite timeout so a
+        // hung refresh can never pin a worker slot. A timeout is truly aborted
+        // and surfaces as a `network` error → classified transient below (never
+        // reconnect). Thrown BEFORE the rotation persist, so no credential write
+        // can happen on a timed-out exchange (TASK-085 CAS untouched).
+        exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken, {
+          timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+        });
       } catch (error) {
         // TASK-069C — classify: only a revoked/interaction grant marks reconnect;
         // network/429/5xx stays transient so the next attempt retries.
@@ -286,7 +301,12 @@ export function createPrismaEmailAccessTokenPort(
 
 export const graphMessageFetchPort: GraphMessageFetchPort = {
   fetchMessage(accessToken, graphMessageId) {
-    return getMessageById(accessToken, graphMessageId);
+    // TASK-092 — same finite ceiling as the token refresh above. On timeout the
+    // request is aborted for real and maps to GraphMailError('network') →
+    // FAILED_GRAPH_FETCH (retryable; never auth/permission/reconnect).
+    return getMessageById(accessToken, graphMessageId, {
+      timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+    });
   },
 };
 
