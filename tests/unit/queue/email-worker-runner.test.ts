@@ -128,8 +128,10 @@ describe('createPrismaEmailAccessTokenPort — token rotation', () => {
     expect(token).toBe('AT');
     expect(decryptMock).toHaveBeenCalledWith('cipher');
     // TASK-092 — the email worker opts into the finite refresh timeout.
+    // TASK-093 — and into the end-to-end body deadline (narrow opt-in).
     expect(refreshMock).toHaveBeenCalledWith('plain-refresh', {
       timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+      deadlineCoversBodyRead: true,
     });
     // The worker uses the SAME rotation helper as delta-polling / renewal, now
     // passing the read generation (G0) as the CAS expected generation (TASK-085).
@@ -310,7 +312,7 @@ describe('email-worker HTTP timeout wiring (TASK-092)', () => {
     expect(EMAIL_WORKER_HTTP_TIMEOUT_MS).toBe(20_000);
   });
 
-  it('graph fetch port passes the SAME finite timeout to getMessageById', async () => {
+  it('graph fetch port passes the SAME finite timeout AND the body-deadline opt-in to getMessageById', async () => {
     getMessageByIdMock.mockResolvedValue({ id: 'msg-1' });
 
     await graphMessageFetchPort.fetchMessage('access-token-placeholder', 'msg-1');
@@ -319,7 +321,11 @@ describe('email-worker HTTP timeout wiring (TASK-092)', () => {
     expect(getMessageByIdMock).toHaveBeenCalledWith(
       'access-token-placeholder',
       'msg-1',
-      { timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS },
+      {
+        timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+        // TASK-093 — narrow opt-in enabled ONLY here (email worker).
+        deadlineCoversBodyRead: true,
+      },
     );
   });
 });

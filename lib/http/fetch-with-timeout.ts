@@ -44,10 +44,50 @@ function isPositiveFinite(value: number | undefined): value is number {
 }
 
 /**
+ * TASK-093 — the single internal deadline core shared by both exported
+ * functions. ONE timer is armed BEFORE `run` starts and cleared only in the
+ * `finally` after `run` settles, so whatever `run` awaits (headers only, or
+ * headers + body consumption) sits under the same absolute deadline. On expiry
+ * the controller aborts (real cancellation — the signal is handed to `run`)
+ * and the rejection is normalized to {@link HttpTimeoutError}; any rejection
+ * while the deadline has NOT fired is re-thrown unchanged.
+ */
+async function runWithDeadline<T>(
+  timeoutMs: number,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await run(controller.signal);
+  } catch (error) {
+    // Distinguish "we aborted due to timeout" from any other rejection so the
+    // caller can classify a timeout as transient rather than a real error.
+    if (timedOut) {
+      throw new HttpTimeoutError(timeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Call `fetchImpl(url, init)` but abort it after `timeoutMs`. On timeout the
  * underlying request is truly aborted and this rejects with {@link HttpTimeoutError}.
  * Any other rejection from `fetchImpl` is re-thrown unchanged. The timer is always
  * cleared, so a fast success never leaves a dangling timer.
+ *
+ * NOTE (TASK-093): the deadline here covers the wait for response HEADERS only —
+ * the timer clears when the fetch promise settles. Callers that must bound the
+ * response BODY read under the same deadline opt into
+ * {@link fetchAndConsumeWithTimeout} instead; this function's behaviour is
+ * intentionally unchanged for every existing caller.
  */
 export async function fetchWithTimeout(
   fetchImpl: typeof fetch,
@@ -60,24 +100,46 @@ export async function fetchWithTimeout(
     // No finite ceiling requested — behave exactly like a direct fetch call.
     return fetchImpl(url, init);
   }
+  return runWithDeadline(timeoutMs, (signal) =>
+    fetchImpl(url, { ...init, signal }),
+  );
+}
 
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-
-  try {
-    return await fetchImpl(url, { ...init, signal: controller.signal });
-  } catch (error) {
-    // Distinguish "we aborted due to timeout" from any other fetch rejection so
-    // the caller can classify a timeout as transient rather than a real error.
-    if (timedOut) {
-      throw new HttpTimeoutError(timeoutMs);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
+/**
+ * TASK-093 — fetch AND consume the response under ONE absolute deadline.
+ *
+ * The single timer starts BEFORE the fetch and is cleared only after `consume`
+ * settles, so the same `timeoutMs` bounds: waiting for headers, reading the
+ * whole response body, and the async parse inside `consume`. There is no
+ * second/body-specific timer and no additive budget. On expiry the controller
+ * aborts — the in-flight request or body stream is torn down for real (never a
+ * `Promise.race` that leaves the stream running) — and the rejection is
+ * normalized to {@link HttpTimeoutError}. A `consume` rejection while the
+ * deadline has NOT fired (e.g. malformed JSON) is re-thrown unchanged so the
+ * caller's existing classification applies.
+ *
+ * `consume` receives the deadline's AbortSignal so a caller that deliberately
+ * swallows body-parse failures (the refresh service) can rethrow ONLY the
+ * deadline-abort rejection. The signal is undefined in pass-through mode.
+ *
+ * Without a positive finite `timeoutMs` the call is a plain pass-through
+ * (direct fetch, then `consume` with no deadline and no signal) — callers that
+ * do not opt in keep today's behaviour exactly.
+ */
+export async function fetchAndConsumeWithTimeout<T>(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  consume: (response: Response, signal?: AbortSignal) => Promise<T>,
+  options: FetchWithTimeoutOptions = {},
+): Promise<T> {
+  const { timeoutMs } = options;
+  if (!isPositiveFinite(timeoutMs)) {
+    const response = await fetchImpl(url, init);
+    return consume(response, undefined);
   }
+  return runWithDeadline(timeoutMs, async (signal) => {
+    const response = await fetchImpl(url, { ...init, signal });
+    return consume(response, signal);
+  });
 }

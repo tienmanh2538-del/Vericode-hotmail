@@ -1,5 +1,8 @@
 import { createLogger } from '@/lib/logger';
-import { fetchWithTimeout } from '@/lib/http/fetch-with-timeout';
+import {
+  fetchAndConsumeWithTimeout,
+  fetchWithTimeout,
+} from '@/lib/http/fetch-with-timeout';
 
 const logger = createLogger();
 
@@ -95,6 +98,12 @@ export interface GetMessageOptions {
   // other caller. On timeout the request is truly aborted and surfaces as a
   // `network` GraphMailError (transient/retryable — never auth/permission).
   timeoutMs?: number;
+  // TASK-093 — explicit opt-in (default OFF): when true, the SAME `timeoutMs`
+  // becomes ONE absolute deadline covering the fetch AND the success-body
+  // `response.json()` read, with real cancellation of the body stream on
+  // expiry. Passing `timeoutMs` alone NEVER changes body-read semantics.
+  // Only the email worker enables this; `listInboxMessages` is unaffected.
+  deadlineCoversBodyRead?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -240,6 +249,45 @@ function requireAccessToken(accessToken: unknown): string {
   return accessToken;
 }
 
+/**
+ * Shared non-2xx handling for BOTH request paths below: classification is
+ * decided purely from `response.status` (+ the retry-after HEADER) — the error
+ * body is never read, so a hanging error body can never be waited on and a
+ * timeout can never masquerade as a real 401/403 (TASK-091 semantics intact).
+ */
+function throwForGraphErrorStatus(
+  response: Response,
+  operationLabel: string,
+): void {
+  if (response.ok) return;
+  const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+  logger.warn(`Microsoft Graph ${operationLabel} rejected request`, {
+    httpStatus: response.status,
+    retryAfterSeconds: retryAfter,
+  });
+  throw mapHttpStatusToError(response.status, retryAfter);
+}
+
+/**
+ * Shared success-body parse for BOTH request paths. A non-abort json failure is
+ * the existing `parse` classification; a deadline-abort rejection (opt-in path
+ * only — `signal` fired) is rethrown raw so the helper normalizes it to
+ * HttpTimeoutError ⇒ `network` in the caller's catch.
+ */
+async function parseGraphJsonBody(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (bodyError) {
+    if (signal?.aborted) throw bodyError;
+    throw new GraphMailError('parse', 'GRAPH_RESPONSE_NOT_JSON', {
+      httpStatus: response.status,
+    });
+  }
+}
+
 async function performGraphRequest(
   url: string,
   accessToken: string,
@@ -247,46 +295,52 @@ async function performGraphRequest(
   fetchImpl: typeof fetch,
   operationLabel: string,
   timeoutMs?: number,
+  deadlineCoversBodyRead?: boolean,
 ): Promise<unknown> {
+  const requestInit: RequestInit = {
+    method: 'GET',
+    headers: buildHeaders(accessToken, preferTextBody),
+  };
+
+  if (deadlineCoversBodyRead === true) {
+    // TASK-093 opt-in — ONE absolute deadline (`timeoutMs`, unchanged value)
+    // covers fetch + success-body read; the timer never resets at headers.
+    try {
+      return await fetchAndConsumeWithTimeout(
+        fetchImpl,
+        url,
+        requestInit,
+        async (response, signal) => {
+          throwForGraphErrorStatus(response, operationLabel);
+          return parseGraphJsonBody(response, signal);
+        },
+        { timeoutMs },
+      );
+    } catch (error) {
+      // Status (`auth`/`permission`/…) and `parse` outcomes from the consumer
+      // pass through unchanged; only a timeout (HttpTimeoutError) or a raw
+      // network rejection becomes the transient `network` kind.
+      if (error instanceof GraphMailError) throw error;
+      logger.error(`Microsoft Graph ${operationLabel} network call failed`);
+      throw new GraphMailError('network', 'GRAPH_NETWORK_ERROR');
+    }
+  }
+
+  // Legacy path (headers-only deadline via TASK-092, or full pass-through) —
+  // behaviour unchanged for every caller that does not opt in.
   let response: Response;
   try {
-    // TASK-092 — when a finite `timeoutMs` is provided the request runs under
-    // `fetchWithTimeout` (AbortController; the signal reaches the native fetch
-    // and the socket is torn down on timeout). Without it the helper is a plain
-    // pass-through, so non-worker callers keep today's behaviour exactly.
-    response = await fetchWithTimeout(
-      fetchImpl,
-      url,
-      {
-        method: 'GET',
-        headers: buildHeaders(accessToken, preferTextBody),
-      },
-      { timeoutMs },
-    );
+    response = await fetchWithTimeout(fetchImpl, url, requestInit, {
+      timeoutMs,
+    });
   } catch {
     // Token value is never logged — only the failure event.
     logger.error(`Microsoft Graph ${operationLabel} network call failed`);
     throw new GraphMailError('network', 'GRAPH_NETWORK_ERROR');
   }
 
-  if (!response.ok) {
-    const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
-    logger.warn(`Microsoft Graph ${operationLabel} rejected request`, {
-      httpStatus: response.status,
-      retryAfterSeconds: retryAfter,
-    });
-    throw mapHttpStatusToError(response.status, retryAfter);
-  }
-
-  let payload: unknown = null;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new GraphMailError('parse', 'GRAPH_RESPONSE_NOT_JSON', {
-      httpStatus: response.status,
-    });
-  }
-  return payload;
+  throwForGraphErrorStatus(response, operationLabel);
+  return parseGraphJsonBody(response);
 }
 
 export async function listInboxMessages(
@@ -352,6 +406,7 @@ export async function getMessageById(
     fetchImpl,
     'getMessageById',
     options.timeoutMs,
+    options.deadlineCoversBodyRead,
   );
 
   const message = normalizeMessage(payload);

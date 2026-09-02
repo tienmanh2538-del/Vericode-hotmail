@@ -116,3 +116,153 @@ describe('getMessageById timeout on the email-worker path (TASK-092)', () => {
     expect(init.signal).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-093 — end-to-end body deadline opt-in (`deadlineCoversBodyRead`).
+// ---------------------------------------------------------------------------
+
+/**
+ * A fetch whose HEADERS resolve immediately, but whose success body (`json()`)
+ * behaves per `bodyMode`: 'hang' never settles until the request signal aborts
+ * (undici contract); 'malformed' rejects like a JSON parse failure; a value
+ * resolves normally. `status` drives the non-2xx path.
+ */
+function fetchWithControllableBody(options: {
+  status?: number;
+  bodyMode: 'hang' | 'malformed' | 'ok';
+}): { fetchImpl: typeof fetch; jsonCalls: number[] } {
+  const jsonCalls: number[] = [];
+  const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+    const signal = init?.signal;
+    return {
+      ok: (options.status ?? 200) >= 200 && (options.status ?? 200) < 300,
+      status: options.status ?? 200,
+      headers: new Headers(),
+      json: () => {
+        jsonCalls.push(1);
+        if (options.bodyMode === 'malformed') {
+          return Promise.reject(new SyntaxError('Unexpected token'));
+        }
+        if (options.bodyMode === 'hang') {
+          return new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted.', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(JSON.parse(MESSAGE_BODY));
+      },
+    } as unknown as Response;
+  }) as unknown as typeof fetch;
+  return { fetchImpl, jsonCalls };
+}
+
+describe('getMessageById end-to-end body deadline opt-in (TASK-093)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('opt-in: hanging success body aborts at the SAME absolute 20s deadline → network kind', async () => {
+    vi.useFakeTimers();
+    const { fetchImpl } = fetchWithControllableBody({ bodyMode: 'hang' });
+
+    const promise = getMessageById('access-token-placeholder', 'msg-1', {
+      timeoutMs: 20_000,
+      deadlineCoversBodyRead: true,
+      fetchImpl,
+    });
+    let settled = false;
+    const captured = promise.then(
+      () => 'unexpected-resolve',
+      (e: unknown) => e,
+    );
+    void captured.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await captured;
+
+    expect(error).toBeInstanceOf(GraphMailError);
+    expect((error as GraphMailError).kind).toBe('network');
+    const init = capturedInit(fetchImpl);
+    expect(init.signal?.aborted).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('opt-in: malformed success JSON before the deadline keeps the parse classification (never timeout)', async () => {
+    const { fetchImpl } = fetchWithControllableBody({ bodyMode: 'malformed' });
+
+    const error = await getMessageById('access-token-placeholder', 'msg-1', {
+      timeoutMs: 20_000,
+      deadlineCoversBodyRead: true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(GraphMailError);
+    expect((error as GraphMailError).kind).toBe('parse');
+  });
+
+  it('opt-in: real 401 classifies from response.status WITHOUT reading the error body', async () => {
+    const { fetchImpl, jsonCalls } = fetchWithControllableBody({
+      status: 401,
+      bodyMode: 'hang',
+    });
+
+    const error = await getMessageById('access-token-placeholder', 'msg-1', {
+      timeoutMs: 20_000,
+      deadlineCoversBodyRead: true,
+      fetchImpl,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(GraphMailError);
+    expect((error as GraphMailError).kind).toBe('auth');
+    expect((error as GraphMailError).httpStatus).toBe(401);
+    // The (hanging) error body was never awaited — status decides, exactly as
+    // before, so a hanging error body cannot wedge nor fake a timeout.
+    expect(jsonCalls).toHaveLength(0);
+  });
+
+  it('compatibility: timeoutMs WITHOUT the opt-in keeps headers-only semantics (body read NOT aborted after the deadline)', async () => {
+    vi.useFakeTimers();
+    // Body read is controllable so the test can finish it manually — the legacy
+    // window never aborts it, and we must not leak a pending handle.
+    let finishBody: (value: unknown) => void = () => undefined;
+    let bodyAborted = false;
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      init?.signal?.addEventListener('abort', () => {
+        bodyAborted = true;
+      });
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: () =>
+          new Promise((resolve) => {
+            finishBody = resolve;
+          }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const promise = getMessageById('access-token-placeholder', 'msg-1', {
+      timeoutMs: 20_000,
+      fetchImpl,
+    });
+    const captured = promise.then(
+      (m) => m,
+      (e: unknown) => e,
+    );
+
+    // Far past the deadline: pre-TASK-093 semantics — no abort of the body.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(bodyAborted).toBe(false);
+
+    // Manually complete the body so the test settles cleanly (no leaked handle).
+    finishBody(JSON.parse(MESSAGE_BODY));
+    const message = await captured;
+    expect((message as { id: string }).id).toBe('msg-1');
+  });
+});

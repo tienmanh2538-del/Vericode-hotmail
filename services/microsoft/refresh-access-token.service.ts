@@ -1,6 +1,9 @@
 import { requireMicrosoftEnv, type EnvValues } from '@/lib/env';
 import { createLogger } from '@/lib/logger';
-import { fetchWithTimeout } from '@/lib/http/fetch-with-timeout';
+import {
+  fetchAndConsumeWithTimeout,
+  fetchWithTimeout,
+} from '@/lib/http/fetch-with-timeout';
 
 const logger = createLogger();
 
@@ -45,6 +48,13 @@ export interface RefreshAccessTokenOptions {
   // email worker / OAuth / renewal callers that do not opt in. A timeout surfaces
   // as a `network` error, which classifies as transient (never reconnect).
   timeoutMs?: number;
+  // TASK-093 — explicit opt-in (default OFF): when true, the SAME `timeoutMs`
+  // becomes ONE absolute deadline covering the fetch AND the response-body read
+  // (`response.json()`), with real cancellation of the body stream on expiry.
+  // Passing `timeoutMs` alone NEVER changes body-read semantics — existing
+  // headers-only callers (delta polling, reconciliation) are bit-for-bit
+  // unchanged. Only the email worker enables this.
+  deadlineCoversBodyRead?: boolean;
 }
 
 interface TokenEndpointSuccessPayload {
@@ -102,34 +112,66 @@ export async function refreshMicrosoftAccessToken(
     grant_type: 'refresh_token',
   });
 
+  const requestInit: RequestInit = {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/x-www-form-urlencoded',
+      accept: 'application/json',
+    },
+    body: body.toString(),
+  };
+
   let response: Response;
+  let payload: unknown = null;
   try {
-    response = await fetchWithTimeout(
-      fetchImpl,
-      tokenUrl,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded',
-          accept: 'application/json',
+    if (options.deadlineCoversBodyRead === true) {
+      // TASK-093 opt-in — ONE absolute deadline (`timeoutMs`, unchanged value)
+      // covers fetch + body read; the timer never resets at headers. The body
+      // is still read for BOTH success and OAuth error responses (the error
+      // payload carries the revoke code), exactly like the legacy path below.
+      // A non-abort json failure keeps the legacy swallow (payload stays null ⇒
+      // the token_endpoint branches below); only a deadline abort is rethrown
+      // so the helper normalizes it to HttpTimeoutError ⇒ `network` here.
+      ({ response, payload } = await fetchAndConsumeWithTimeout(
+        fetchImpl,
+        tokenUrl,
+        requestInit,
+        async (res, signal) => {
+          let parsed: unknown = null;
+          try {
+            parsed = await res.json();
+          } catch (bodyError) {
+            if (signal?.aborted) throw bodyError;
+            // Non-JSON body — treated as endpoint failure below (unchanged).
+          }
+          return { response: res, payload: parsed };
         },
-        body: body.toString(),
-      },
-      { timeoutMs: options.timeoutMs },
-    );
+        { timeoutMs: options.timeoutMs },
+      ));
+    } else {
+      response = await fetchWithTimeout(fetchImpl, tokenUrl, requestInit, {
+        timeoutMs: options.timeoutMs,
+      });
+    }
   } catch {
     // TASK-080 — a timeout (HttpTimeoutError) or any network failure is reported
     // as a `network` error, which `classifyRefreshTokenError` treats as transient
     // (never reconnect). The underlying request was truly aborted on timeout.
+    // TASK-093 — with the body-deadline opt-in this same branch also covers a
+    // deadline that fires while reading the success or error body: transient,
+    // never reconnect, and always BEFORE any rotated-credential persistence.
     logger.error('Microsoft token endpoint network call failed (refresh grant)');
     throw new RefreshAccessTokenError('network', 'Microsoft token request failed');
   }
 
-  let payload: unknown = null;
-  try {
-    payload = await response.json();
-  } catch {
-    // Non-JSON body — treated as endpoint failure below.
+  if (options.deadlineCoversBodyRead !== true) {
+    // Legacy body read (headers-only deadline callers + no-timeout callers):
+    // outside any deadline window, exactly as before TASK-093.
+    try {
+      payload = await response.json();
+    } catch {
+      // Non-JSON body — treated as endpoint failure below.
+    }
   }
 
   if (!response.ok) {

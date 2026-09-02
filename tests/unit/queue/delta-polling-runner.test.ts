@@ -108,6 +108,26 @@ describe('createPrismaAccessTokenPort — token rotation (TASK-036)', () => {
     expect(updateMany).not.toHaveBeenCalled();
   });
 
+  it('TASK-093 compatibility — delta keeps the headers-only timeout: NO body-deadline opt-in is passed', async () => {
+    decryptMock.mockReturnValue('old-plaintext-refresh');
+    refreshMock.mockResolvedValue({ accessToken: 'fresh-access-token' });
+
+    const { client } = mailboxClient('cipher-old');
+    const port = createPrismaAccessTokenPort(client as never);
+    await port.getAccessTokenForMailbox({
+      id: 'mb_compat',
+      emailAddress: 'compat@example.com',
+      microsoftDeltaCursor: null,
+    });
+
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+    const options = refreshMock.mock.calls[0][1] as Record<string, unknown>;
+    // TASK-080 semantics preserved bit-for-bit: the 20s ceiling stays, and the
+    // TASK-093 narrow opt-in flag is ABSENT (never auto-enabled by timeoutMs).
+    expect(options.timeoutMs).toBe(20_000);
+    expect('deadlineCoversBodyRead' in options).toBe(false);
+  });
+
   it('maps a missing refresh token to a token error and never calls refresh', async () => {
     const { client } = mailboxClient(null);
     const port = createPrismaAccessTokenPort(client as never);

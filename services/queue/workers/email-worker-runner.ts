@@ -267,6 +267,10 @@ export function createPrismaEmailAccessTokenPort(
         // can happen on a timed-out exchange (TASK-085 CAS untouched).
         exchanged = await refreshMicrosoftAccessToken(plaintextRefreshToken, {
           timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+          // TASK-093 — narrow opt-in: the SAME 20s becomes one absolute
+          // deadline covering fetch + response-body read (real cancellation).
+          // Only this email-worker caller enables it.
+          deadlineCoversBodyRead: true,
         });
       } catch (error) {
         // TASK-069C — classify: only a revoked/interaction grant marks reconnect;
@@ -306,6 +310,8 @@ export const graphMessageFetchPort: GraphMessageFetchPort = {
     // FAILED_GRAPH_FETCH (retryable; never auth/permission/reconnect).
     return getMessageById(accessToken, graphMessageId, {
       timeoutMs: EMAIL_WORKER_HTTP_TIMEOUT_MS,
+      // TASK-093 — narrow opt-in: same absolute deadline across fetch + body.
+      deadlineCoversBodyRead: true,
     });
   },
 };
