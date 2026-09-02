@@ -5,6 +5,10 @@
 > migration. Đây là follow-up của residual finding **DF-92-1** (TASK-092).
 > Sanitized: không secret, không token/credential, không connection string,
 > không full verification code, không full email body.
+>
+> Banner trên là lịch sử Phase 1 (giữ nguyên). Trạng thái hiện tại: Phase 2
+> implementation (§15) và close-out end-to-end trên staging (§16) đã hoàn tất;
+> chưa production rollout.
 
 ---
 
@@ -607,6 +611,131 @@ Không file nào khác.
   code pin), DF-92-2 (caller-signal composition), DF-92-4/DF-92-6
   (mailbox-lock wiring/TTL), timeout observability — không tự biến thành
   TASK-094.
-- Chưa commit/push; ROADMAP chưa đổi; không Railway; chưa staging promotion.
-- **Trạng thái: Antigravity Implementation Review PASS; sẵn sàng Final
-  Pre-Commit Review.**
+- Các bước sau Implementation Review (Final Pre-Commit Review, commit/push,
+  feature CI, staging promotion, runtime validation) và trạng thái close-out:
+  xem §16.
+
+---
+
+## §16. Close-out — quality gates, staging runtime validation, completion status
+
+> Documentation-only close-out. Không implementation, không sửa code/tests,
+> không migration, không thao tác Railway, không production rollout.
+
+### §16.1. Quality gates (tất cả PASS)
+
+1. Phase 1 Investigation / Architecture — hoàn tất (§1–§14).
+2. Antigravity Architecture Review — PASS.
+3. Phase 2 implementation + deterministic tests — hoàn tất (§15).
+4. Antigravity Implementation Review — PASS.
+5. Antigravity Final Pre-Commit Review — PASS.
+6. Feature commit/push — PASS.
+7. Feature CI — PASS.
+8. Controlled fast-forward promotion sang staging — PASS.
+9. Staging CI — PASS.
+10. Railway staging runtime validation — PASS.
+11. Antigravity Staging Runtime Validation — **PASS — TASK-093 STAGING RUNTIME
+    VALIDATION APPROVED**.
+12. Không có finding Critical, High hoặc Medium.
+
+### §16.2. Implementation đã chốt (recap)
+
+- Kiến trúc **Option A1 — Narrow Opt-in** (§7, §15).
+- MỘT absolute deadline 20.000 ms phủ: fetch/request phase, response headers,
+  response body consumption và asynchronous consumer parsing.
+- Timer bắt đầu trước fetch; KHÔNG reset khi headers trả về; chỉ clear sau
+  khi consumer settle.
+- Cancellation thật bằng AbortController; deadline normalize thành
+  `HttpTimeoutError`; không dùng Promise.race để bỏ HTTP/body operation chạy
+  nền.
+- Capability mặc định OFF; chỉ đúng hai Microsoft seams trên worker-email bật
+  opt-in: access-token refresh và Graph `getMessageById`.
+- `fetchWithTimeout` legacy headers-only behavior giữ nguyên.
+- worker-delta, worker-renewal/reconciliation, web, cleanup,
+  `listInboxMessages` và Telegram KHÔNG nhận behavioral change từ TASK-093.
+  Behavioral change thực tế chỉ ở worker-email.
+- Không schema/migration/env/Redis/BullMQ/Railway architecture change.
+
+Error semantics đã chốt:
+
+- Graph body deadline: network/transient → `FAILED_GRAPH_FETCH` → BullMQ retry.
+- Token response-body deadline: network/transient → `FAILED_TOKEN_TRANSIENT`
+  → BullMQ retry.
+- Không giả thành 401 hoặc 403; không mark RECONNECT_REQUIRED khi provider
+  error code chưa đọc được.
+- Readable `invalid_grant`/`interaction_required` giữ reconnect semantics
+  hiện hành; real Graph 401/403 vẫn classify bằng HTTP status như hiện hành;
+  ErrorQuotaExceeded semantics của TASK-091 không đổi.
+- Timeout xảy ra trước credential persistence và trước ProcessedMessage/
+  delivery ownership claims — không CAS conflict, không permanent
+  ProcessedMessage failure, không Telegram side effect.
+
+### §16.3. Verification evidence
+
+- Targeted: 7 test files / 81 tests PASS.
+- Full suite: 110 test files / 1366 tests PASS (16 deterministic tests mới).
+- ESLint PASS; TypeScript typecheck PASS; Next.js production build PASS;
+  Prisma generate PASS; `git diff --check` PASS.
+
+### §16.4. Runtime staging evidence (phân loại nguồn)
+
+Nguồn evidence: (a) Git/SHA/code/verify do Antigravity kiểm tra trực tiếp từ
+repository; (b) GitHub Actions, Railway, admin health và queue/runtime
+evidence do operator cung cấp — Antigravity KHÔNG tuyên bố đã trực tiếp truy
+cập Railway.
+
+Ghi nhận:
+
+- Reviewed feature SHA = promoted staging SHA:
+  `05a29085402b061150bfdc168dc13046936663ac`.
+- Promotion là fast-forward thuần; không merge commit hoặc commit lạ.
+- Staging GitHub Actions PASS.
+- Bốn Railway services (web, worker-email, worker-delta, worker-renewal) vẫn
+  dùng branch staging; Auto Deploy = ON; Wait for CI = ON.
+- Chỉ web có Pre-Deploy (`npx prisma migrate deploy`); TASK-093 không có
+  migration nên Pre-Deploy hoàn tất dạng no-op.
+- Bốn services Active/Healthy; `/admin/health` không regression.
+- worker-email không crash loop hoặc unhandled rejection mới.
+- Không spike bất thường của `FAILED_TOKEN_TRANSIENT`, `FAILED_GRAPH_FETCH`,
+  Graph parse errors, token endpoint errors, timeout/network failures.
+- worker-delta và worker-renewal không regression quan sát được.
+- Queue không có backlog tăng liên tục hoặc mất concurrency capacity.
+
+### §16.5. Evidence limitations (trung thực)
+
+- Natural Microsoft response-body hang/slow-drip: **NOT OBSERVED — EXPECTED**.
+- KHÔNG tuyên bố staging đã tự nhiên kích hoạt timeout 20 giây.
+- Không tạo synthetic outage hoặc synthetic body hang trên staging.
+- Absolute deadline và abort behavior được chứng minh chủ yếu bằng
+  deterministic tests với fake timers và controllable response body (§15.4).
+- High-throughput load test không được thực hiện.
+- Không có natural hang hoặc load test không phải blocker: startup, health,
+  queues và các worker đều ổn định.
+
+### §16.6. Residual findings (giữ deferred, KHÔNG thuộc scope TASK-093)
+
+- DF-93-1: delta response-body reads, gồm delta refresh path, chưa opt-in.
+- DF-93-2: Telegram response-body read chưa có deadline riêng.
+- DF-93-3: subscription/web/OAuth response-body seams ngoài scope.
+- DF-93-4: undici/default body timeout không được pin bằng code.
+- DF-92-2: caller AbortSignal composition.
+- DF-92-4: Redis-backed mailbox-lock production wiring.
+- DF-92-6: mailbox-lock TTL 60 giây ngắn hơn worst-case valid attempt.
+- Timeout observability vẫn được gộp vào network classification.
+
+Không finding nào được biến thành implementation của TASK-093; không tự tạo
+TASK-094.
+
+### §16.7. Completion status
+
+- Investigation/Architecture: COMPLETE.
+- Implementation: COMPLETE.
+- Review (Architecture / Implementation / Pre-Commit / Runtime): COMPLETE.
+- Feature commit/push + feature CI: COMPLETE.
+- Staging promotion + staging CI: COMPLETE.
+- Runtime validation: COMPLETE.
+- **TASK-093 hoàn tất end-to-end trên staging.**
+- **Chưa production rollout.**
+- ROADMAP được cập nhật trong close-out này (entry TASK-093 completed
+  end-to-end).
+- **Task tiếp theo: CHƯA được quyết định.**
